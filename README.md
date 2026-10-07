@@ -8,14 +8,16 @@ Each release installer is **one native executable for its operating system and a
 
 Linux amd64 release payloads require an **x86-64-v2 CPU** and glibc 2.34 or later, matching the AlmaLinux/RHEL 9 build baseline. The installer checks every processor's required features before running bundled binaries. Linux ARM64 uses the ARMv8-A baseline. Disabling host-native AVX/FMA does not lower the static C++ libraries' CPU minimum.
 
-Download the matching artifact from [GitHub releases](https://github.com/matthewalexandern/AI/releases), check it against `SHA256SUMS`, then run:
+Download the matching artifact from [v0.1.0-rc.4](https://github.com/matthewalexandern/AI/releases/tag/v0.1.0-rc.4), check it against `SHA256SUMS`, then run. This candidate passed native CPU checks on all six targets and clean Ubuntu/AlmaLinux installs; physical GPU and Hyper-V acceptance tests remain pending.
 
 ```sh
 # Ubuntu 22.04+ / RHEL 9-compatible Linux, x86-64-v2 CPU; use linux-arm64 on ARM
+chmod +x ./mini-fabrics-installer-linux-amd64
 ./mini-fabrics-installer-linux-amd64 --doctor
 ./mini-fabrics-installer-linux-amd64 --model gpt-oss-20b --non-interactive
 
 # macOS 13+, Apple silicon; use darwin-amd64 on Intel
+chmod +x ./mini-fabrics-installer-darwin-arm64
 ./mini-fabrics-installer-darwin-arm64 --model auto --non-interactive
 ```
 
