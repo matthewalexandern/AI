@@ -17,12 +17,47 @@ The Hyper-V guests below are CPU test environments. Their success does not
 establish CUDA, Vulkan, GPU passthrough, GPU partitioning, or macOS compatibility.
 No desktop was accessed and no Windows feature was enabled by creating these
 scripts in the Linux cloud workspace. Platform-specific runs remain necessary.
+The Linux amd64 release requires an **x86-64-v2** CPU because of its AlmaLinux 9
+static C++ runtime libraries. A Hyper-V guest must expose those CPU features;
+virtualization does not lower the installer's instruction-set requirement.
 
 For the Windows desktop, run the PowerShell commands below locally, or connect
 that desktop as an explicitly configured self-hosted runner. Selecting Hyper-V
 in this chat does not connect a desktop terminal to the cloud task. Hyper-V
 enablement still runs only on that Windows machine and never restarts it
 automatically.
+
+To put the checkout on that desktop, run this in local Windows PowerShell with
+Git installed. An existing checkout is reused without changing its branch or
+files; an unrelated existing directory is preserved and rejected:
+
+```powershell
+$desktopPath = [Environment]::GetFolderPath('Desktop')
+if ([string]::IsNullOrWhiteSpace($desktopPath)) { throw 'Windows did not report a Desktop folder.' }
+$checkoutPath = Join-Path $desktopPath 'MiniFabrics'
+if (Test-Path -LiteralPath $checkoutPath) {
+    if (-not (Test-Path -LiteralPath $checkoutPath -PathType Container) -or
+        -not (Test-Path -LiteralPath (Join-Path $checkoutPath '.git'))) {
+        throw 'The existing Desktop/MiniFabrics path is not a checkout; it was preserved.'
+    }
+    $origin = & git -C $checkoutPath remote get-url origin
+    if ($LASTEXITCODE -ne 0 -or $origin -notin @(
+        'https://github.com/matthewalexandern/AI.git',
+        'https://github.com/matthewalexandern/AI',
+        'git@github.com:matthewalexandern/AI.git')) {
+        throw 'The existing checkout does not have the expected AI origin; it was preserved.'
+    }
+    Write-Host 'Reusing the existing AI checkout; its files and current branch are unchanged.'
+} else {
+    & git clone --branch mini-fabrics-v0.1.0 --single-branch https://github.com/matthewalexandern/AI.git $checkoutPath
+    if ($LASTEXITCODE -ne 0) { throw 'Clone failed. Inspect the Git error before retrying; existing files were not deleted.' }
+}
+Set-Location -LiteralPath $checkoutPath
+```
+
+The cloud terminal cannot execute this against an unconnected Windows desktop.
+If an existing checkout predates these scripts, update it deliberately after
+preserving any local work; the reuse path above does not pull or reset it.
 
 The standard six-platform release workflow currently builds CPU payloads on all
 platforms and additionally includes Metal in macOS packages. It does **not**
@@ -184,7 +219,40 @@ The runner checks that hash locally and again after transferring to the guest:
 Repeat with the RHEL guest address and a new report directory. Use `-Port` and
 `-IdentityFile` when needed. The script accepts a DNS name or IPv4 address; IPv6
 address literals are not supported. `-Model` selects one of the catalog models;
-the default is `qwen2.5-0.5b`.
+the default smoke fixture is `qwen2.5-1.5b`. The smaller 0.5B model remains an
+explicit option, but its weaker recall/assessment can fail the strict smoke
+check. Both guest and Windows host runners accept `gpt-oss-20b` and
+`gpt-oss-120b`, as well as all three Qwen sizes.
+
+Use `-TurnTimeoutSeconds 900` for a slower CPU run. The default is 300 seconds;
+accepted values are integers from 10 through 3600. This limit applies to each
+assistant turn, not the whole installation, SSH session, or smoke suite. The
+smoke test performs multiple turns. Startup has its separate existing deadline.
+The selected model and per-turn timeout are retained in the controller/guest
+reports, including failures.
+
+A balanced turn can use four model calls when revision and reassessment are
+needed. On slow portable CPU builds, 900 seconds may still be insufficient; use
+`-TurnTimeoutSeconds 1800` for a longer full-review budget, or another value up to
+3600. This changes the deadline without relaxing assessment or persistence checks.
+
+For a guest with sufficient available RAM and disk, select GPT-OSS explicitly:
+
+```powershell
+.\tools\hyperv\Invoke-LinuxGuestTest.ps1 `
+  -HostName 192.168.1.120 -UserName tester `
+  -Installer .\dist\mini-fabrics-installer-linux-amd64 `
+  -InstallerSHA256 $trustedInstallerSHA256 `
+  -Model gpt-oss-20b -TurnTimeoutSeconds 900 `
+  -ReportDirectory .\test-evidence\ubuntu-gpt20-cpu
+```
+
+The default 6 GiB guest is sized for the small smoke fixture, not GPT-OSS. Increase
+guest RAM before testing GPT-OSS 20B. GPT-OSS 120B needs substantially more RAM
+and a larger disk than the default 48 GiB: its model weights alone are about
+59 GiB. The test runners keep installer memory-fit checks enabled and do not
+override low-memory failures. Extending the turn deadline does not make a model
+fit in available memory.
 
 Each run creates its own `/tmp/mini-fabrics-test-*` directory, runs the complete
 installer with `--backend cpu`, runs doctor, then tests inference, isolated
@@ -205,12 +273,21 @@ report is not a pass.
 Use a native release installer for that Windows machine, with its trusted
 checksum. Python 3.9+ and the checkout's smoke script are test dependencies.
 Run this as an ordinary user; it does not enable Hyper-V or install GPU drivers.
+The default smoke model is Qwen2.5 1.5B with a 300-second per-turn deadline.
+For a slow GPT-OSS CPU run that needs revision/reassessment, the 900-second
+example below can be increased to `-TurnTimeoutSeconds 1800`.
 
 ```powershell
 .\tools\hyperv\Invoke-WindowsHostTest.ps1 `
   -Installer .\dist\mini-fabrics-installer-windows-amd64.exe `
   -InstallerSHA256 $trustedWindowsInstallerSHA256 -Backend cpu `
   -ReportDirectory .\test-evidence\windows-cpu
+
+.\tools\hyperv\Invoke-WindowsHostTest.ps1 `
+  -Installer .\dist\mini-fabrics-installer-windows-amd64.exe `
+  -InstallerSHA256 $trustedWindowsInstallerSHA256 -Backend cpu `
+  -Model gpt-oss-20b -TurnTimeoutSeconds 900 `
+  -ReportDirectory .\test-evidence\windows-gpt20-cpu
 
 .\tools\hyperv\Invoke-WindowsHostTest.ps1 `
   -Installer .\gpu-candidate\mini-fabrics-installer-windows-amd64-cuda.exe `
@@ -230,6 +307,9 @@ a GPU pass. Inspect `smoke.json` and `logs/smoke-*/runtime.log`; the report's
 `runtime_log` field identifies the log. `host-report.json` records the requested
 backend and whether the GPU evidence gate was required. Keep these artifacts
 alongside the release checksum and record the real host/driver in the test record.
+`host-report.json` also records the selected model and `turn_timeout_seconds`.
+Use `-Model gpt-oss-120b` only on a host with sufficient RAM/VRAM and disk; the same
+10–3600 second timeout bounds and memory-fit checks apply.
 
 ## Build a complete GPU candidate on its native host
 

@@ -228,6 +228,33 @@ def glibc_requirement(files):
     return max(versions, key=lambda v: tuple(map(int, v.split(".")))) if versions else None
 
 
+def verify_elf_cpu_isa(files, declared="x86-64-v2"):
+    """Audit GNU ISA requirements, including the linked static C++ runtime."""
+    levels = {"x86-64-baseline": 1, "x86-64-v2": 2, "x86-64-v3": 3, "x86-64-v4": 4}
+    if declared != "x86-64-v2":
+        raise ValueError("Linux amd64 native releases require the declared x86-64-v2 baseline")
+    requirements = {}
+    for file in files:
+        notes = capture(["readelf", "-n", file])
+        properties = re.findall(r"x86 ISA needed:\s*([^\r\n]+)", notes)
+        if not properties:
+            raise ValueError("Cannot verify GNU CPU ISA property for " + str(file))
+        required = set()
+        for property in properties:
+            for name in property.split(","):
+                name = name.strip()
+                if name not in levels:
+                    raise ValueError("Unrecognized GNU CPU ISA requirement: " + name)
+                required.add(name)
+        maximum = max(required, key=levels.__getitem__)
+        if levels[maximum] > levels[declared]:
+            raise ValueError(str(file) + " requires " + maximum + "; release declares " + declared)
+        requirements[Path(file).name] = "x86-64-v1" if maximum == "x86-64-baseline" else maximum
+    if not requirements:
+        raise ValueError("No native ELF files supplied for CPU ISA verification")
+    return requirements
+
+
 @contextmanager
 def build_workspace(parent, keep=False):
     # TemporaryDirectory handles read-only Go module notices on Windows during
@@ -361,6 +388,7 @@ def build(args):
         if "metal" in backends and goos != "darwin":
             raise ValueError("Metal native payloads require macOS")
         paths, dependencies, compiler_records, build_flags, glibc = {}, {}, {}, {}, None
+        elf_cpu_isa = {}
         for backend in backends:
             builddir = stage / ("build-" + backend)
             flags = ["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF", "-DGGML_STATIC=OFF", "-DGGML_NATIVE=OFF", "-DGGML_OPENMP=OFF", "-DGGML_AVX=OFF", "-DGGML_AVX2=OFF", "-DGGML_FMA=OFF", "-DGGML_F16C=OFF", "-DLLAMA_BUILD_SERVER=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_OPENSSL=OFF", "-DLLAMA_BUILD_UI=OFF", "-DLLAMA_USE_PREBUILT_UI=OFF", "-DLLAMA_SUBPROCESS=OFF", "-DGGML_CUDA=OFF", "-DGGML_METAL=OFF", "-DGGML_VULKAN=OFF", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=$ORIGIN", "-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF"]
@@ -411,6 +439,8 @@ def build(args):
                     raise ValueError("Payload requires glibc " + required + "; rebuild on Alma/RHEL 9 baseline rather than claiming glibc " + args.max_glibc)
                 if required and (not glibc or tuple(map(int, required.split("."))) > tuple(map(int, glibc.split(".")))):
                     glibc = required
+                if goarch == "amd64":
+                    elf_cpu_isa[backend] = verify_elf_cpu_isa([p for p in dest.iterdir() if p.is_file()])
             run([binary, "--version"])
         if goos == "darwin":
             helper = ROOT / "native/macos/SystemInfo.swift"
@@ -425,6 +455,8 @@ def build(args):
         archive_data = deterministic_archive(payload)
         manifest = {"format_version": 1, "version": VERSION, "platform": goos + "/" + goarch, "backends": backends, "default_backend": "cpu", "backend_paths": paths, "files": files, "archive_sha256": hashlib.sha256(archive_data).hexdigest(), "llama_commit": LLAMA_COMMIT, "llama_source_sha256": LLAMA_SHA256, "go_version": capture([go, "version"]), "go_sum_sha256": sha256(ROOT / "go.sum"), "go_mod_sha256": sha256(ROOT / "go.mod"), "runtime_source_files": {p.relative_to(ROOT).as_posix(): sha256(p) for d in (ROOT / "cmd/fabrics", ROOT / "internal") for p in sorted(d.rglob("*.go")) if not p.name.endswith("_test.go")}, "model_catalog_sha256": sha256(ROOT / "installer/models.json"), "cpu_isa": "portable baseline; no host-native AVX/FMA", "dependencies": dependencies, "glibc_minimum": glibc, "macos_minimum": "13.0" if goos == "darwin" else None, "cmake_version": capture([args.cmake, "--version"]).splitlines()[0], "compilers": compiler_records, "build_flags": build_flags, "source_date_epoch": 0, "driver_requirements": [x for x in backends if x in ("cuda", "vulkan")]}
         manifest.update(locked_source)
+        if goos == "linux" and goarch == "amd64":
+            manifest.update(minimum_cpu_isa="x86-64-v2", cpu_isa="x86-64-v2 (RHEL9 baseline); no host-native AVX/FMA", elf_cpu_isa=elf_cpu_isa)
         archive_dest, manifest_dest = args.output / (target + ".tar.gz"), args.output / (target + ".json")
         (stage / archive_dest.name).write_bytes(archive_data)
         (stage / manifest_dest.name).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

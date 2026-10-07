@@ -20,10 +20,11 @@ class GuestHarnessTests(unittest.TestCase):
         self.installer = self.work / "installer"
         self.installer.write_text(
             "#!/usr/bin/env python3\n"
-            "from pathlib import Path\nimport sys\n"
+            "from pathlib import Path\nimport json\nimport sys\n"
             "prefix = Path(sys.argv[sys.argv.index('--prefix') + 1])\n"
             "assert prefix.parent == Path(__file__).parent\n"
             "assert sys.argv[sys.argv.index('--backend') + 1] == 'cpu'\n"
+            "(Path(__file__).parent / 'installer-selection.json').write_text(json.dumps({'model': sys.argv[sys.argv.index('--model') + 1]}))\n"
             "runtime = prefix / 'bin' / 'fabrics'\n"
             "runtime.parent.mkdir(parents=True)\n"
             "runtime.write_text('#!/bin/sh\\nprintf \\\"fixture doctor\\\\n\\\"\\n')\n"
@@ -36,19 +37,21 @@ class GuestHarnessTests(unittest.TestCase):
             "def argument(name): return sys.argv[sys.argv.index(name) + 1]\n"
             "assert argument('--expect-backend') == 'cpu'\n"
             "assert argument('--mode') == 'balanced'\n"
+            "turn_timeout = int(argument('--turn-timeout'))\n"
+            "assert 10 <= turn_timeout <= 3600\n"
             "assert Path(argument('--home')).parent == Path(__file__).parent\n"
             "logs = Path(argument('--log-directory'))\n"
             "logs.mkdir(parents=True)\n"
             "(logs / 'runtime.log').write_text('fixture log')\n"
-            "Path(argument('--report')).write_text(json.dumps({'fixture': True}))\n"
+            "Path(argument('--report')).write_text(json.dumps({'fixture': True, 'turn_timeout_seconds': turn_timeout, 'arguments': sys.argv[1:]}))\n"
             "print('fixture smoke')\n",
             encoding="utf-8",
         )
 
-    def run_harness(self, checksum=None):
+    def run_harness(self, checksum=None, model="qwen2.5-1.5b", turn_timeout=300):
         digest = checksum or hashlib.sha256(self.installer.read_bytes()).hexdigest()
         return subprocess.run(
-            ["bash", str(ROOT / "guest-test.sh"), str(self.work), digest, "qwen2.5-0.5b"],
+            ["bash", str(ROOT / "guest-test.sh"), str(self.work), digest, model, str(turn_timeout)],
             capture_output=True, text=True, timeout=20,
         )
 
@@ -61,14 +64,17 @@ class GuestHarnessTests(unittest.TestCase):
         report = self.report()
         self.assertEqual(report["status"], "passed")
         self.assertEqual(report["last_stage"], "complete")
+        self.assertEqual(report["model"], "qwen2.5-1.5b")
+        self.assertEqual(report["turn_timeout_seconds"], 300)
         self.assertFalse(report["gpu_validated"])
         self.assertTrue((self.work / "evidence" / "smoke.json").is_file())
         self.assertEqual((self.work / "evidence" / "logs" / "runtime.log").read_text(), "fixture log")
 
     def test_wrong_checksum_never_executes_installer(self):
-        process = self.run_harness("0" * 64)
+        process = self.run_harness("0" * 64, model="gpt-oss-20b", turn_timeout=900)
         self.assertNotEqual(process.returncode, 0)
         self.assertFalse((self.work / "install").exists())
+        self.assertFalse((self.work / "installer-selection.json").exists())
         self.assertEqual(self.report()["last_stage"], "installer_checksum")
         self.assertEqual(self.report()["status"], "failed")
 
@@ -82,11 +88,47 @@ class GuestHarnessTests(unittest.TestCase):
 
     def test_smoke_failure_does_not_become_success(self):
         (self.work / "smoke.py").write_text("import sys\nprint('fixture smoke failure')\nsys.exit(19)\n", encoding="utf-8")
-        process = self.run_harness()
+        process = self.run_harness(model="gpt-oss-20b", turn_timeout=900)
         self.assertEqual(process.returncode, 19, process.stdout + process.stderr)
         self.assertEqual(self.report()["last_stage"], "smoke")
         self.assertEqual(self.report()["status"], "failed")
+        self.assertEqual(self.report()["model"], "gpt-oss-20b")
+        self.assertEqual(self.report()["turn_timeout_seconds"], 900)
         self.assertIn("fixture smoke failure", (self.work / "evidence" / "smoke.log").read_text())
+
+    def assert_selection_forwarded(self, model, turn_timeout):
+        process = self.run_harness(model=model, turn_timeout=turn_timeout)
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        selection = json.loads((self.work / "installer-selection.json").read_text())
+        smoke = json.loads((self.work / "evidence" / "smoke.json").read_text())
+        self.assertEqual(selection["model"], model)
+        self.assertEqual(self.report()["model"], model)
+        self.assertEqual(self.report()["turn_timeout_seconds"], turn_timeout)
+        self.assertEqual(smoke["turn_timeout_seconds"], turn_timeout)
+        arguments = smoke["arguments"]
+        self.assertEqual(arguments.count("--turn-timeout"), 1)
+        self.assertEqual(arguments[arguments.index("--turn-timeout") + 1], str(turn_timeout))
+
+    def test_gpt_20b_selection_and_slow_cpu_timeout_reach_smoke(self):
+        self.assert_selection_forwarded("gpt-oss-20b", 900)
+
+    def test_gpt_120b_selection_and_maximum_timeout_reach_smoke(self):
+        self.assert_selection_forwarded("gpt-oss-120b", 3600)
+
+    def test_minimum_timeout_reaches_smoke(self):
+        self.assert_selection_forwarded("qwen2.5-3b", 10)
+
+    def test_small_catalog_model_remains_an_explicit_choice(self):
+        self.assert_selection_forwarded("qwen2.5-0.5b", 300)
+
+    def test_invalid_timeouts_fail_before_installation_or_evidence_changes(self):
+        for invalid in ("", "9", "3601", "-1", "+900", "900.0", " 900", "0900", "NaN", "9" * 100, "1+900"):
+            with self.subTest(timeout=invalid):
+                process = self.run_harness(turn_timeout=invalid)
+                self.assertEqual(process.returncode, 2)
+                self.assertFalse((self.work / "install").exists())
+                self.assertFalse((self.work / "installer-selection.json").exists())
+                self.assertFalse((self.work / "evidence").exists())
 
 
 if __name__ == "__main__":

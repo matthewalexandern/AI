@@ -31,6 +31,20 @@ class NativePayloadTests(unittest.TestCase):
         output = '0000 DF *UND* (GLIBC_2.9) old_symbol\n0000 DF *UND* (GLIBC_2.34) new_symbol\n0000 g DF .text GLIBC_2.35 exported_symbol\n0000 DF *UND* (GLIBC_PRIVATE) internal_symbol\n'
         with mock.patch.object(native,'capture',return_value=output):
             self.assertEqual(native.glibc_requirement([Path('server')]),'2.34')
+    def test_elf_cpu_isa_enforces_declared_minimum_for_every_library(self):
+        baseline = 'Properties: x86 ISA needed: x86-64-baseline, x86-64-v2\n'
+        with mock.patch.object(native, 'capture', return_value=baseline):
+            self.assertEqual(native.verify_elf_cpu_isa([Path('llama-server')]), {'llama-server': 'x86-64-v2'})
+        for higher in ('x86-64-v3', 'x86-64-v4'):
+            def notes(command):
+                return baseline if Path(command[-1]).name == 'llama-server' else 'Properties: x86 ISA needed: '+higher+'\n'
+            with mock.patch.object(native, 'capture', side_effect=notes):
+                with self.assertRaisesRegex(ValueError, 'requires '+higher):
+                    native.verify_elf_cpu_isa([Path('llama-server'), Path('libexample.so')])
+        for unknown in ('', 'Properties: x86 ISA needed: <unknown: 10>\n'):
+            with mock.patch.object(native, 'capture', return_value=unknown):
+                with self.assertRaises(ValueError):
+                    native.verify_elf_cpu_isa([Path('llama-server')])
     def test_failed_build_workspace_can_be_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, 'build failure'):

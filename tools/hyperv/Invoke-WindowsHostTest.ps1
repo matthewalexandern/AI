@@ -12,12 +12,14 @@ param(
     [Parameter(Mandatory = $true)][string]$Installer,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$InstallerSHA256,
     [Parameter(Mandatory = $true)][ValidateSet('cpu', 'cuda', 'vulkan')][string]$Backend,
-    [ValidateSet('qwen2.5-0.5b', 'qwen2.5-1.5b', 'qwen2.5-3b')][string]$Model = 'qwen2.5-0.5b',
+    [ValidateSet('qwen2.5-0.5b', 'qwen2.5-1.5b', 'qwen2.5-3b', 'gpt-oss-20b', 'gpt-oss-120b')][string]$Model = 'qwen2.5-1.5b',
+    [ValidateRange(10, 3600)][int]$TurnTimeoutSeconds = 300,
     [string]$Python = 'python',
     [string]$ReportDirectory = (Join-Path (Get-Location) ('mini-fabrics-windows-' + [guid]::NewGuid().ToString('N')))
 )
 
 $ErrorActionPreference = 'Stop'
+$Model = $Model.ToLowerInvariant()
 if ($env:OS -ne 'Windows_NT') { throw 'Run this verification script on the actual Windows host.' }
 . (Join-Path $PSScriptRoot 'Test-Common.ps1')
 $artifact = Assert-FabricsArtifact -Path $Installer -ExpectedSHA256 $InstallerSHA256
@@ -40,7 +42,7 @@ try {
     $code = Invoke-FabricsLoggedCommand -Executable $runtime -Arguments @('--home', $installation, 'doctor') -LogPath (Join-Path $report 'doctor.log')
     if ($code -ne 0) { throw "Runtime doctor failed (exit $code)." }
     $stage = 'smoke'
-    $arguments = @($smoke, '--runtime', $runtime, '--home', $installation, '--mode', 'balanced', '--expect-backend', $Backend, '--log-directory', (Join-Path $report 'logs'), '--report', (Join-Path $report 'smoke.json'))
+    $arguments = @($smoke, '--runtime', $runtime, '--home', $installation, '--mode', 'balanced', '--expect-backend', $Backend, '--turn-timeout', "$TurnTimeoutSeconds", '--log-directory', (Join-Path $report 'logs'), '--report', (Join-Path $report 'smoke.json'))
     if ($Backend -ne 'cpu') { $arguments += '--require-gpu' }
     $code = Invoke-FabricsLoggedCommand -Executable $pythonPath -Arguments $arguments -LogPath (Join-Path $report 'smoke.log')
     if ($code -ne 0) { throw "Smoke verification failed (exit $code); inspect smoke.log and logs/smoke-*/runtime.log." }
@@ -51,6 +53,7 @@ catch { $failure = $_.Exception.Message }
 finally {
     [ordered]@{
         status = $status; last_stage = $stage; backend = $Backend; model = $Model
+        turn_timeout_seconds = $TurnTimeoutSeconds
         installer_sha256 = $InstallerSHA256.ToLowerInvariant()
         gpu_evidence_required = ($Backend -ne 'cpu'); memory_isolation = 'new installation and temporary smoke memory database'
         report_directory = $report; failure = $failure

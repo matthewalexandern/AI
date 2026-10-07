@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Invoked over existing authenticated SSH by Invoke-LinuxGuestTest.ps1.
 set -euo pipefail
-if [[ $# != 3 || "$1" != /tmp/mini-fabrics-test-* || ! "$2" =~ ^[a-fA-F0-9]{64}$ ]]; then
-    printf '%s\n' 'Expected generated work directory, installer SHA256, and catalog model.' >&2
+if [[ $# != 4 || "$1" != /tmp/mini-fabrics-test-* || ! "$2" =~ ^[a-fA-F0-9]{64}$ ]]; then
+    printf '%s\n' 'Expected generated work directory, installer SHA256, catalog model, and turn timeout in seconds.' >&2
     exit 2
 fi
 work_directory="$1"
 installer_sha="$2"
 model="$3"
-case "$model" in qwen2.5-0.5b|qwen2.5-1.5b|qwen2.5-3b) ;; *) exit 2 ;; esac
+turn_timeout="$4"
+case "$model" in qwen2.5-0.5b|qwen2.5-1.5b|qwen2.5-3b|gpt-oss-20b|gpt-oss-120b) ;; *) exit 2 ;; esac
+# Check decimal syntax/length before arithmetic to avoid shell expressions,
+# octal interpretation, or overflow from malformed direct invocations.
+if [[ ! "$turn_timeout" =~ ^[1-9][0-9]{1,3}$ ]] || (( turn_timeout < 10 || turn_timeout > 3600 )); then
+    printf '%s\n' 'Turn timeout must be an integer from 10 to 3600 seconds.' >&2
+    exit 2
+fi
 umask 077
 evidence="$work_directory/evidence"
 mkdir -p "$evidence"
@@ -20,12 +27,12 @@ stage='prerequisites'
 write_report() {
     result="$?"
     trap - EXIT
-    python3 - "$evidence/guest-report.json" "$result" "$stage" "$installer_sha" "$model" <<'PY'
+    python3 - "$evidence/guest-report.json" "$result" "$stage" "$installer_sha" "$model" "$turn_timeout" <<'PY'
 import json
 from pathlib import Path
 import platform
 import sys
-destination, code, stage, checksum, model = sys.argv[1:]
+destination, code, stage, checksum, model, turn_timeout = sys.argv[1:]
 os_release = {}
 for line in Path('/etc/os-release').read_text().splitlines():
     if '=' in line:
@@ -33,7 +40,7 @@ for line in Path('/etc/os-release').read_text().splitlines():
         if key in ('ID', 'VERSION_ID', 'PRETTY_NAME'):
             os_release[key] = value.strip('"')
 report = {'status': 'passed' if code == '0' else 'failed', 'exit_code': int(code),
-          'last_stage': stage, 'backend': 'cpu', 'model': model,
+          'last_stage': stage, 'backend': 'cpu', 'model': model, 'turn_timeout_seconds': int(turn_timeout),
           'installer_sha256': checksum, 'architecture': platform.machine(),
           'os_release': os_release, 'memory_isolation': 'unique installation prefix and smoke temporary memory database',
           'gpu_validated': False}
@@ -53,6 +60,6 @@ stage='doctor'
 "$work_directory/install/bin/fabrics" --home "$work_directory/install" doctor 2>&1 | tee "$evidence/doctor.log"
 stage='smoke'
 python3 "$work_directory/smoke.py" --runtime "$work_directory/install/bin/fabrics" \
-    --home "$work_directory/install" --mode balanced --expect-backend cpu \
+    --home "$work_directory/install" --mode balanced --expect-backend cpu --turn-timeout "$turn_timeout" \
     --log-directory "$evidence/logs" --report "$evidence/smoke.json" 2>&1 | tee "$evidence/smoke.log"
 stage='complete'

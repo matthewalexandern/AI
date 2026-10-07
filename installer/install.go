@@ -210,6 +210,9 @@ func run(args []string, in io.Reader, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if err := verifyNativeCPUCompatibility(inst.native, os.ReadFile); err != nil {
+			return err
+		}
 		inst.nativeRoot, err = os.MkdirTemp("", "mini-fabrics-native-")
 		if err != nil {
 			return err
@@ -254,6 +257,9 @@ func run(args []string, in io.Reader, out io.Writer) error {
 	if opts.doctor {
 		if inst.native != nil {
 			fmt.Fprintf(out, "Native release %s verified: runtime, inference variants, dependencies and licenses bundled. No Go/CMake/C++ installation is required.\n", inst.native.Version)
+			if inst.native.Platform == "linux/amd64" {
+				fmt.Fprintf(out, "CPU minimum: %s; required features verified on every Linux processor.\n", inst.native.MinimumCPUISA)
+			}
 			fmt.Fprintln(out, "Required network: selected model host and its HTTPS redirects only; a local GGUF or --skip-model needs no downloads.")
 		} else {
 			fmt.Fprintf(out, "Source-build tools: CMake=%t C++ compiler=%t Go=%t; NVIDIA=%t CUDA compiler=%t Vulkan shader compiler=%t Metal=%t\n", hw.CMake, hw.CXX, hw.Go, hw.NVIDIA, hw.CUDA, hw.Vulkan, hw.Metal)
@@ -1767,6 +1773,7 @@ type nativeManifest struct {
 	DefaultBackend string            `json:"default_backend"`
 	BackendPaths   map[string]string `json:"backend_paths"`
 	LlamaCommit    string            `json:"llama_commit"`
+	MinimumCPUISA  string            `json:"minimum_cpu_isa,omitempty"`
 	Files          map[string]string `json:"files"`
 	Raw            json.RawMessage   `json:"-"`
 }
@@ -1786,6 +1793,9 @@ func loadNativeManifest(encoded, goos, goarch string) (*nativeManifest, error) {
 	manifest.Raw = append(json.RawMessage(nil), data...)
 	if manifest.FormatVersion != 1 || manifest.Version == "" || manifest.Platform != goos+"/"+goarch || manifest.LlamaCommit != llamaCommit || len(manifest.Files) == 0 || len(manifest.Files) > 4096 {
 		return nil, errors.New("native release manifest has an unsupported version, platform, source pin, or file count")
+	}
+	if manifest.Platform == "linux/amd64" && manifest.MinimumCPUISA != "x86-64-v2" {
+		return nil, errors.New("Linux amd64 native release must declare the supported x86-64-v2 CPU minimum")
 	}
 	seen := make(map[string]bool)
 	licenses := false
@@ -1821,6 +1831,94 @@ func loadNativeManifest(encoded, goos, goarch string) (*nativeManifest, error) {
 		return nil, errors.New("native release requires CPU fallback and a supported default backend")
 	}
 	return &manifest, nil
+}
+
+// Alma/RHEL 9's compiler and static C++ runtime use x86-64-v2 even when
+// ggml host-native optimizations are disabled. Check every logical processor
+// before executing a bundled binary; a VM can expose different CPU flags.
+func verifyNativeCPUCompatibility(manifest *nativeManifest, readFile func(string) ([]byte, error)) error {
+	if manifest.Platform != "linux/amd64" {
+		return nil
+	}
+	if manifest.MinimumCPUISA != "x86-64-v2" {
+		return errors.New("Linux amd64 native release has no supported CPU minimum")
+	}
+	data, err := readFile("/proc/cpuinfo")
+	if err != nil {
+		return fmt.Errorf("cannot verify required x86-64-v2 CPU features from /proc/cpuinfo: %w; use a supported Linux host or --build-from-source", err)
+	}
+	return verifyLinuxAMD64V2(string(data))
+}
+
+func verifyLinuxAMD64V2(data string) error {
+	var processor string
+	var features map[string]bool
+	seen := make(map[string]bool)
+	checked := 0
+	checkProcessor := func() error {
+		if processor == "" {
+			return nil
+		}
+		if features == nil {
+			return fmt.Errorf("cannot verify x86-64-v2: CPU %s has no flags in /proc/cpuinfo; use a supported Linux host or --build-from-source", processor)
+		}
+		var missing []string
+		for _, feature := range []string{"cx16", "lahf_lm", "popcnt", "ssse3", "sse4_1", "sse4_2"} {
+			if !features[feature] {
+				missing = append(missing, feature)
+			}
+		}
+		// Linux normally names SSE3 "pni"; accept its explicit alias too.
+		if !features["pni"] && !features["sse3"] {
+			missing = append(missing, "SSE3 (pni/sse3)")
+		}
+		if len(missing) != 0 {
+			return fmt.Errorf("Linux amd64 native runtime requires x86-64-v2; CPU %s is missing %s; use a supported CPU or --build-from-source", processor, strings.Join(missing, ", "))
+		}
+		checked++
+		processor, features = "", nil
+		return nil
+	}
+	for _, line := range strings.Split(data, "\n") {
+		if strings.TrimSpace(line) == "" {
+			if err := checkProcessor(); err != nil {
+				return err
+			}
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		switch key {
+		case "processor":
+			if err := checkProcessor(); err != nil {
+				return err
+			}
+			n, err := strconv.ParseUint(value, 10, 32)
+			if err != nil || seen[strconv.FormatUint(n, 10)] {
+				return errors.New("cannot verify x86-64-v2: invalid or duplicate CPU identifier in /proc/cpuinfo")
+			}
+			processor = strconv.FormatUint(n, 10)
+			seen[processor] = true
+		case "flags":
+			if processor == "" || features != nil {
+				return errors.New("cannot verify x86-64-v2: invalid processor flags in /proc/cpuinfo")
+			}
+			features = make(map[string]bool)
+			for _, flag := range strings.Fields(value) {
+				features[flag] = true
+			}
+		}
+	}
+	if err := checkProcessor(); err != nil {
+		return err
+	}
+	if checked == 0 {
+		return errors.New("cannot verify required x86-64-v2 CPU features from /proc/cpuinfo; use a supported Linux host or --build-from-source")
+	}
+	return nil
 }
 
 func extractNativePayload(encoded, expected, dest string, manifest *nativeManifest) error {

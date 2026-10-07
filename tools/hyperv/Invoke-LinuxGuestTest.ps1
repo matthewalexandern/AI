@@ -14,13 +14,15 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-z_][a-z0-9_-]{0,31}$')][string]$UserName,
     [Parameter(Mandatory = $true)][string]$Installer,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$InstallerSHA256,
-    [ValidateSet('qwen2.5-0.5b', 'qwen2.5-1.5b', 'qwen2.5-3b')][string]$Model = 'qwen2.5-0.5b',
+    [ValidateSet('qwen2.5-0.5b', 'qwen2.5-1.5b', 'qwen2.5-3b', 'gpt-oss-20b', 'gpt-oss-120b')][string]$Model = 'qwen2.5-1.5b',
+    [ValidateRange(10, 3600)][int]$TurnTimeoutSeconds = 300,
     [ValidateRange(1, 65535)][int]$Port = 22,
     [string]$IdentityFile,
     [string]$ReportDirectory = (Join-Path (Get-Location) ('mini-fabrics-linux-' + [guid]::NewGuid().ToString('N')))
 )
 
 $ErrorActionPreference = 'Stop'
+$Model = $Model.ToLowerInvariant()
 . (Join-Path $PSScriptRoot 'Test-Common.ps1')
 $artifact = Assert-FabricsArtifact -Path $Installer -ExpectedSHA256 $InstallerSHA256
 $ssh = (Get-Command ssh -ErrorAction Stop).Source
@@ -56,8 +58,9 @@ try {
         if ($code -ne 0) { throw "Transfer of $($upload.Remote) failed (exit $code)." }
     }
     # Every remote argument is a generated /tmp path, validated catalog token,
-    # or a validated hexadecimal digest. No caller-supplied shell text is used.
-    $command = "bash $remoteDirectory/guest-test.sh $remoteDirectory $($InstallerSHA256.ToLowerInvariant()) $Model"
+    # a validated hexadecimal digest, or a bounded integer. No caller-supplied
+    # shell text is used.
+    $command = "bash $remoteDirectory/guest-test.sh $remoteDirectory $($InstallerSHA256.ToLowerInvariant()) $Model $TurnTimeoutSeconds"
     $code = Invoke-FabricsLoggedCommand -Executable $ssh -Arguments ($sshOptions + @($destination, $command)) -LogPath (Join-Path $report 'guest-session.log')
     if ($code -ne 0) { throw "Guest install/smoke failed (exit $code); inspect the retained evidence." }
     $status = 'passed'
@@ -77,6 +80,7 @@ finally {
     }
     [ordered]@{
         status = $status; host = $HostName; backend = 'cpu'; model = $Model
+        turn_timeout_seconds = $TurnTimeoutSeconds
         installer_sha256 = $InstallerSHA256.ToLowerInvariant()
         guest_directory = $remoteDirectory; report_directory = $report; failure = $failure
         scope = 'Linux guest CPU installation, inference, isolated memory, persistence and shutdown; no GPU validation'

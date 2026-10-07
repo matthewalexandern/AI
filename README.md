@@ -6,10 +6,12 @@ A local runtime owned by Go, with llama.cpp inference, SQLite FTS5 memory, and b
 
 Each release installer is **one native executable for its operating system and architecture**. It contains the compiled Go runtime, native llama.cpp backend binaries, required application libraries, dependency licenses, and integrity manifests. Ordinary installation needs no Go, CMake, or C++ compiler. GPU drivers and operating-system libraries remain host prerequisites. Model weights are selected separately and verified when downloaded; they are not embedded in the installer.
 
+Linux amd64 release payloads require an **x86-64-v2 CPU** and glibc 2.34 or later, matching the AlmaLinux/RHEL 9 build baseline. The installer checks every processor's required features before running bundled binaries. Linux ARM64 uses the ARMv8-A baseline. Disabling host-native AVX/FMA does not lower the static C++ libraries' CPU minimum.
+
 Download the matching artifact from [GitHub releases](https://github.com/matthewalexandern/AI/releases), check it against `SHA256SUMS`, then run:
 
 ```sh
-# Ubuntu 22.04+ / RHEL 9-compatible Linux; use linux-arm64 on ARM
+# Ubuntu 22.04+ / RHEL 9-compatible Linux, x86-64-v2 CPU; use linux-arm64 on ARM
 ./mini-fabrics-installer-linux-amd64 --doctor
 ./mini-fabrics-installer-linux-amd64 --model gpt-oss-20b --non-interactive
 
@@ -44,7 +46,7 @@ Default installation home is the user configuration directory plus `mini-fabrics
 
 ```sh
 fabrics --home /path/to/mini-fabrics doctor
-fabrics --home /path/to/mini-fabrics chat --session personal
+fabrics --home /path/to/mini-fabrics chat --session personal --turn-timeout 30m
 fabrics --home /path/to/mini-fabrics ask --mode adaptive --json "Explain SQLite FTS5 briefly."
 fabrics --home /path/to/mini-fabrics ask --mode deep --json "Compare these options and review the tradeoffs."
 ```
@@ -62,7 +64,7 @@ Adaptive scheduling uses request structure, length, recalled evidence, and histo
 | Balanced | Answer and assessment, with at most one revision/reassessment; maximum four calls | JSON Schema constrained and application validated. |
 | Deep | Outline, answer, assessment, with at most one revision/reassessment; maximum five calls | Same bounded validation. |
 
-JSON results include `assessed` and the scheduling `decision`: requested/selected modes, reason, call budget, actual calls, phases, and duration. Episodes persist the same metadata. Model confidence never selects the workflow or triggers escalation. Failed, canceled, truncated, or malformed turns save no partial conversation. Ctrl+C stops the owned inference child; Unix also handles SIGTERM. `--startup-timeout 240s` permits slower model loading. Turns default to five minutes; `--turn-timeout 15m` allows slower CPU workflows (bounded from 10 seconds to 60 minutes). Large models on portable CPU builds can take minutes per phase; GPU validation is separate.
+JSON results include `assessed` and the scheduling `decision`: requested/selected modes, reason, call budget, actual calls, phases, and duration. Episodes persist the same metadata. Model confidence never selects the workflow or triggers escalation. Failed, canceled, truncated, or malformed turns save no partial conversation. Ctrl+C stops the owned inference child; Unix also handles SIGTERM. `--startup-timeout 240s` permits slower model loading. Turns default to five minutes; `--turn-timeout 30m` allows slower CPU full review (bounded from 10 seconds to 60 minutes). GPT-OSS 20B balanced arithmetic and recall took approximately 7.7 and 14.7 minutes on the portable four-core cloud build. GPU validation is separate.
 
 ## Memory management
 

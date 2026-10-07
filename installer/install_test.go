@@ -765,6 +765,9 @@ func nativeFixture(t *testing.T) (nativeManifest, []byte) {
 		"licenses/LICENSE":          []byte("test license"),
 	}
 	manifest := nativeManifest{FormatVersion: 1, Version: "0.1.0", Platform: runtime.GOOS + "/" + runtime.GOARCH, LlamaCommit: llamaCommit, Backends: []string{"cpu"}, DefaultBackend: "cpu", BackendPaths: map[string]string{"cpu": "backends/cpu/llama-server"}, Files: map[string]string{}}
+	if manifest.Platform == "linux/amd64" {
+		manifest.MinimumCPUISA = "x86-64-v2"
+	}
 	var data bytes.Buffer
 	gz := gzip.NewWriter(&data)
 	tarWriter := tar.NewWriter(gz)
@@ -790,6 +793,7 @@ func TestNativeManifestAndPayloadValidation(t *testing.T) {
 	manifest, archive := nativeFixture(t)
 	if runtime.GOOS == "windows" {
 		manifest.Platform = "linux/amd64"
+		manifest.MinimumCPUISA = "x86-64-v2"
 	}
 	encode := func(m nativeManifest) string {
 		data, _ := json.Marshal(m)
@@ -815,6 +819,90 @@ func TestNativeManifestAndPayloadValidation(t *testing.T) {
 	manifest.Files["bin/../../outside"] = strings.Repeat("0", 64)
 	if _, err := loadNativeManifest(encode(manifest), goos, arch); err == nil {
 		t.Fatal("escaping native manifest path accepted")
+	}
+}
+
+func TestLinuxAMD64V2ChecksEveryProcessor(t *testing.T) {
+	const complete = "cx16 lahf_lm popcnt pni ssse3 sse4_1 sse4_2"
+	cpu := func(id, flags string) string { return "processor : " + id + "\nflags : " + flags + "\n\n" }
+	if err := verifyLinuxAMD64V2(cpu("0", complete) + cpu("1", strings.ReplaceAll(complete, "pni", "sse3"))); err != nil {
+		t.Fatal(err)
+	}
+	for _, feature := range strings.Fields(complete) {
+		t.Run("missing_"+feature, func(t *testing.T) {
+			if err := verifyLinuxAMD64V2(cpu("0", strings.ReplaceAll(complete, feature, ""))); err == nil {
+				t.Fatalf("CPU lacking required %s accepted", feature)
+			}
+		})
+	}
+	cases := map[string]string{
+		"heterogeneous CPUs": cpu("0", complete) + cpu("1", strings.ReplaceAll(complete, "sse4_2", "")),
+		"CPU missing flags":  cpu("0", complete) + "processor : 1\nmodel name : unknown\n",
+		"no processors":      "model name : unknown\n",
+		"empty flags":        cpu("0", ""),
+		"flags without CPU":  "flags : " + complete,
+		"duplicate CPU":      cpu("0", complete) + cpu("0", complete),
+		"duplicate flags":    "processor : 0\nflags : " + complete + "\nflags : " + complete,
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := verifyLinuxAMD64V2(data); err == nil {
+				t.Fatal("unknown or unsupported CPU configuration accepted")
+			}
+		})
+	}
+}
+
+func TestNativeCPURequirementRejectsUnknownHostAndUndeclaredMinimum(t *testing.T) {
+	manifest, _ := nativeFixture(t)
+	manifest.Platform, manifest.MinimumCPUISA = "linux/amd64", "x86-64-v2"
+	if err := verifyNativeCPUCompatibility(&manifest, func(name string) ([]byte, error) {
+		if name != "/proc/cpuinfo" {
+			t.Fatal(name)
+		}
+		return nil, os.ErrNotExist
+	}); err == nil || !strings.Contains(err.Error(), "--build-from-source") {
+		t.Fatalf("unknown host lacks actionable rejection: %v", err)
+	}
+	for _, minimum := range []string{"", "x86-64-v1", "x86-64-v3"} {
+		manifest.MinimumCPUISA = minimum
+		data, _ := json.Marshal(manifest)
+		if _, err := loadNativeManifest(base64.StdEncoding.EncodeToString(data), "linux", "amd64"); err == nil {
+			t.Fatalf("unsupported or undeclared CPU minimum %q accepted", minimum)
+		}
+	}
+	manifest.Platform = "linux/arm64"
+	if err := verifyNativeCPUCompatibility(&manifest, func(string) ([]byte, error) {
+		t.Fatal("x86 CPU check ran on ARM64")
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNativeDoctorRejectsMissingMinimumBeforeReadingArchive(t *testing.T) {
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("Linux amd64 release contract")
+	}
+	manifest, _ := nativeFixture(t)
+	manifest.MinimumCPUISA = ""
+	data, _ := json.Marshal(manifest)
+	oldArchive, oldHash, oldManifest := nativeArchiveBase64, nativeArchiveSHA256, nativeManifestBase64
+	t.Cleanup(func() {
+		nativeArchiveBase64, nativeArchiveSHA256, nativeManifestBase64 = oldArchive, oldHash, oldManifest
+	})
+	nativeArchiveBase64, nativeArchiveSHA256, nativeManifestBase64 = "invalid archive", "invalid hash", base64.StdEncoding.EncodeToString(data)
+	prefix := filepath.Join(t.TempDir(), "untouched")
+	var out bytes.Buffer
+	err := run([]string{"--doctor", "--prefix", prefix}, strings.NewReader(""), &out)
+	if err == nil || !strings.Contains(err.Error(), "x86-64-v2") {
+		t.Fatalf("CPU preflight did not precede archive/binary processing: %v", err)
+	}
+	if strings.Contains(out.String(), "Running ") {
+		t.Fatal("native binary executed before CPU preflight")
+	}
+	if _, err := os.Stat(prefix); !os.IsNotExist(err) {
+		t.Fatal("CPU rejection changed installation directory")
 	}
 }
 
