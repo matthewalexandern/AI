@@ -19,6 +19,7 @@ import tempfile
 import urllib.request
 import gzip
 import importlib.util
+import struct
 from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -228,28 +229,92 @@ def glibc_requirement(files):
     return max(versions, key=lambda v: tuple(map(int, v.split(".")))) if versions else None
 
 
+def elf_x86_64_isa_mask(file):
+    """Read GNU_PROPERTY_X86_ISA_1_NEEDED independently of readelf's version."""
+    with Path(file).open("rb") as content:
+        size = os.fstat(content.fileno()).st_size
+        header = content.read(64)
+        if len(header) != 64 or header[:7] != b"\x7fELF\x02\x01\x01":
+            raise ValueError("Cannot verify CPU ISA: expected a little-endian ELF64 binary: " + str(file))
+        elf_type, machine, version = struct.unpack_from("<HHI", header, 16)
+        phoff = struct.unpack_from("<Q", header, 32)[0]
+        ehsize, phentsize, phnum = struct.unpack_from("<HHH", header, 52)
+        if elf_type not in (2, 3) or machine != 62 or version != 1 or ehsize != 64 or phentsize != 56 or not 1 <= phnum <= 4096 or phoff < 64 or phoff + phnum * phentsize > size:
+            raise ValueError("Cannot verify CPU ISA: unsupported or malformed ELF program headers: " + str(file))
+        content.seek(phoff)
+        headers = content.read(phnum * phentsize)
+        if len(headers) != phnum * phentsize:
+            raise ValueError("Truncated ELF program headers: " + str(file))
+        ranges = set()
+        for offset in range(0, len(headers), phentsize):
+            kind = struct.unpack_from("<I", headers, offset)[0]
+            if kind not in (4, 0x6474e553):  # PT_NOTE and PT_GNU_PROPERTY
+                continue
+            start, length = struct.unpack_from("<Q", headers, offset + 8)[0], struct.unpack_from("<Q", headers, offset + 32)[0]
+            if start > size or length > size - start or length > 16 * 1024 * 1024:
+                raise ValueError("Invalid or excessive ELF note range: " + str(file))
+            if length:
+                ranges.add((start, length))
+        if sum(length for _, length in ranges) > 16 * 1024 * 1024:
+            raise ValueError("Excessive ELF note data: " + str(file))
+        masks, seen_notes = [], set()
+        for start, length in sorted(ranges):
+            content.seek(start)
+            notes = content.read(length)
+            if len(notes) != length:
+                raise ValueError("Truncated ELF note data: " + str(file))
+            position = 0
+            while position < len(notes):
+                if len(notes) - position < 12:
+                    raise ValueError("Truncated ELF note header: " + str(file))
+                namesize, descsize, kind = struct.unpack_from("<III", notes, position)
+                name_start = position + 12
+                desc_start = name_start + ((namesize + 3) & ~3)
+                end = desc_start + ((descsize + 3) & ~3)
+                if end > len(notes):
+                    raise ValueError("Truncated ELF note name or descriptor: " + str(file))
+                absolute = start + position
+                if absolute not in seen_notes and kind == 5 and notes[name_start:name_start + namesize] == b"GNU\x00":
+                    seen_notes.add(absolute)
+                    descriptor = notes[desc_start:desc_start + descsize]
+                    property_position, found_isa = 0, False
+                    while property_position < len(descriptor):
+                        if len(descriptor) - property_position < 8:
+                            raise ValueError("Truncated GNU property header: " + str(file))
+                        property_type, datasize = struct.unpack_from("<II", descriptor, property_position)
+                        data_start = property_position + 8
+                        property_end = data_start + ((datasize + 7) & ~7)
+                        if property_end > len(descriptor):
+                            raise ValueError("Truncated GNU property data or padding: " + str(file))
+                        if property_type == 0xc0008002:
+                            if datasize != 4 or found_isa:
+                                raise ValueError("Invalid or duplicate GNU CPU ISA property: " + str(file))
+                            mask = struct.unpack_from("<I", descriptor, data_start)[0]
+                            if mask == 0 or mask & ~0xf:
+                                raise ValueError("Unrecognized GNU CPU ISA requirement bits: " + hex(mask))
+                            masks.append(mask)
+                            found_isa = True
+                        property_position = property_end
+                position = end
+        if not masks:
+            raise ValueError("Cannot verify GNU CPU ISA property for " + str(file))
+        result = 0
+        for mask in masks:
+            result |= mask
+        return result
+
+
 def verify_elf_cpu_isa(files, declared="x86-64-v2"):
     """Audit GNU ISA requirements, including the linked static C++ runtime."""
-    levels = {"x86-64-baseline": 1, "x86-64-v2": 2, "x86-64-v3": 3, "x86-64-v4": 4}
     if declared != "x86-64-v2":
         raise ValueError("Linux amd64 native releases require the declared x86-64-v2 baseline")
     requirements = {}
     for file in files:
-        notes = capture(["readelf", "-n", file])
-        properties = re.findall(r"x86 ISA needed:\s*([^\r\n]+)", notes)
-        if not properties:
-            raise ValueError("Cannot verify GNU CPU ISA property for " + str(file))
-        required = set()
-        for property in properties:
-            for name in property.split(","):
-                name = name.strip()
-                if name not in levels:
-                    raise ValueError("Unrecognized GNU CPU ISA requirement: " + name)
-                required.add(name)
-        maximum = max(required, key=levels.__getitem__)
-        if levels[maximum] > levels[declared]:
+        mask = elf_x86_64_isa_mask(file)
+        maximum = "x86-64-v" + str(mask.bit_length())
+        if mask & (4 | 8):
             raise ValueError(str(file) + " requires " + maximum + "; release declares " + declared)
-        requirements[Path(file).name] = "x86-64-v1" if maximum == "x86-64-baseline" else maximum
+        requirements[Path(file).name] = maximum
     if not requirements:
         raise ValueError("No native ELF files supplied for CPU ISA verification")
     return requirements

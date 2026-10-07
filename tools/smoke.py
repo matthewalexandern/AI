@@ -55,6 +55,27 @@ def retained_log_path(log_directory):
     return directory / "runtime.log"
 
 
+def retain_visible_result(path, results, phase, result):
+    # Keep only the public runtime contract, never raw llama.cpp responses or
+    # reasoning channels. Save before assertions so a wrong answer is reviewable
+    # after the isolated memory database has been removed.
+    visible = {key: result[key] for key in ("answer", "plan", "assessed", "revised") if key in result}
+    for field, keys in (
+        ("assessment", ("confidence", "needs_revision", "notes", "missing")),
+        ("decision", ("requested_mode", "mode", "reason", "call_budget", "calls", "phases", "duration_ms")),
+    ):
+        value = result.get(field)
+        if isinstance(value, dict):
+            visible[field] = {key: value[key] for key in keys if key in value}
+    if isinstance(result.get("memories"), list):
+        visible["memories"] = [
+            {key: entry[key] for key in ("id", "content", "kind", "created_at", "score") if key in entry}
+            for entry in result["memories"] if isinstance(entry, dict)
+        ]
+    results[phase] = visible
+    path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+
+
 def check_result(result, expected_mode=None):
     if not isinstance(result.get("answer"), str) or not result["answer"].strip():
         raise AssertionError("The model did not produce an answer")
@@ -246,6 +267,8 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
         base = f"http://127.0.0.1:{api_port}"
         process_options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
         log_path = retained_log_path(log_directory)
+        results_path = log_path.with_name("api-results.json")
+        visible_results = {}
         with log_path.open("wb") as log:
             process = subprocess.Popen([str(runtime), "--home", str(isolated), "serve", "--listen", f"127.0.0.1:{api_port}", "--startup-timeout", f"{startup_timeout:g}s", "--turn-timeout", f"{turn_timeout:g}s"], stdout=log, stderr=subprocess.STDOUT, **process_options)
             try:
@@ -270,10 +293,12 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
                 evidence["readiness_seconds"] = round(time.monotonic() - startup_begin, 3)
 
                 arithmetic = request(base, "/v1/chat", {"session": "arithmetic", "input": "What is 2 + 2? Give one short sentence."}, timeout=turn_timeout + 30)
+                retain_visible_result(results_path, visible_results, "arithmetic", arithmetic)
                 model_quality_warnings = check_arithmetic(arithmetic, mode)
 
                 memory = request(base, "/v1/memory", {"content": "The user's favorite planet is Neptune."})
                 recall = request(base, "/v1/chat", {"session": "recall", "input": "What is my favorite planet? Use my saved preference and answer briefly."}, timeout=turn_timeout + 30)
+                retain_visible_result(results_path, visible_results, "recall", recall)
                 check_result(recall, mode)
                 if "neptune" not in recall["answer"].lower():
                     raise AssertionError("The model failed to use its saved memory")
@@ -292,6 +317,8 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
                 log.flush()
                 print_diagnostic(log_path.read_text(encoding="utf-8", errors="replace")[-6000:])
                 print_diagnostic(f"Preserved runtime log: {log_path}")
+                if results_path.exists():
+                    print_diagnostic(f"Preserved visible API results: {results_path}")
                 raise
             finally:
                 stop(process)
@@ -311,6 +338,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
         return {"status": "passed_with_model_warnings" if model_quality_warnings else "passed", "runtime_checks": "passed", "model_quality_warnings": model_quality_warnings,
                 "model": Path(configuration["model_path"]).name, "mode": mode, "backend": configured_backend,
                 "backend_evidence": evidence, "hardware_tested": evidence["hardware_tested"], "runtime_log": str(log_path),
+                "visible_results": str(results_path),
                 "arithmetic": arithmetic, "recall": recall, "persisted_turn": episodes[0], "shutdown": shutdown, "reopen": "persisted turn unchanged"}
 
 

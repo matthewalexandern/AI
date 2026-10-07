@@ -62,6 +62,44 @@ class ModelResultTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "missing-information list is invalid"):
             smoke.check_arithmetic(self.result(missing="not a list"))
 
+    def test_failed_recall_keeps_visible_answers_after_isolated_home_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "installed"
+            home.mkdir()
+            (home / "config.json").write_text(json.dumps({"backend": "cpu", "model_path": "fixture.gguf"}), encoding="utf-8")
+            arithmetic = self.result()
+            recall = self.result(answer="I do not have your saved preference.")
+            recall["memories"] = [{"id": 2, "content": "The user's favorite planet is Neptune.", "kind": "explicit", "reasoning_content": "PRIVATE_NESTED_FIXTURE"}]
+            recall["reasoning_content"] = "PRIVATE_TOP_LEVEL_FIXTURE"
+            process = mock.Mock()
+            process.poll.return_value = None
+
+            def start(*args, **kwargs):
+                kwargs["stdout"].write(b"load_tensors: CPU_Mapped model buffer size = 512.00 MiB\n")
+                kwargs["stdout"].flush()
+                return process
+
+            console = io.StringIO()
+            with mock.patch.object(smoke.tempfile, "tempdir", str(root)), mock.patch.object(smoke.sys, "stdout", console), \
+                    mock.patch.object(smoke.subprocess, "Popen", side_effect=start), \
+                    mock.patch.object(smoke, "request", side_effect=[{"status": "ok"}, arithmetic, {"id": 2}, recall]), \
+                    mock.patch.object(smoke, "stop") as stop:
+                with self.assertRaisesRegex(AssertionError, "failed to use its saved memory"):
+                    smoke.smoke(sys.executable, home)
+            stop.assert_called_once_with(process)
+            retained = list(root.glob("mini-fabrics-smoke-logs-*/api-results.json"))
+            self.assertEqual(len(retained), 1)
+            encoded = retained[0].read_text(encoding="utf-8")
+            captured = json.loads(encoded)
+            self.assertEqual(captured["arithmetic"]["answer"], arithmetic["answer"])
+            self.assertEqual(captured["recall"]["answer"], recall["answer"])
+            self.assertEqual(captured["recall"]["decision"], recall["decision"])
+            self.assertEqual(captured["recall"]["memories"], [{"id": 2, "content": "The user's favorite planet is Neptune.", "kind": "explicit"}])
+            self.assertNotIn("PRIVATE_", encoded)
+            self.assertIn(str(retained[0]), console.getvalue())
+            self.assertEqual(set(root.iterdir()), {home, retained[0].parent})
+
     def test_explicit_mode_and_call_budget_are_checked(self):
         result = self.result()
         with self.assertRaisesRegex(AssertionError, "requested cognition mode"):

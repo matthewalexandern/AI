@@ -4,6 +4,8 @@ GPT-OSS 20B MXFP4 is the preferred model when it fits the memory estimate. GPT-O
 
 Memory inspect/forget/export/backup/restore operates without inference. Consistent backups include committed WAL state; restores validate before atomic publication. Schema v1 upgrades preserve history, and ordinary new memories do not reuse forgotten IDs. Deletion is logical and does not erase historical backups or old disk pages.
 
+An explicit fast GPT-OSS smoke attempt failed the saved-preference answer check. Its cause is unconfirmed; fast returns the first sampled answer, while the passing balanced recall required revision. Adaptive mode selects balanced when memories are recalled. Routine setup uses the verified Qwen 1.5B balanced fixture; the main cloud home remains configured for GPT-OSS. Smoke evidence now retains visible responses before assertions and excludes reasoning channels.
+
 Release assembly is gated on actual native CPU installation and inference checks on six OS/architecture targets, plus compiler-free Ubuntu22.04 and AlmaLinux9 containers. macOS packages CPU and Metal backends and a Swift hardware adapter; Linux/Windows standard installers contain CPU. CUDA/Vulkan candidates are built and positively tested separately on connected self-hosted GPU hardware.
 
 This release candidate does not establish Metal/CUDA/Vulkan hardware compatibility or successful Windows-desktop/Hyper-V VM execution. Those host checks remain pending. ROCm is not implemented. See docs/native-testing.md for the Windows PowerShell and Hyper-V harnesses and docs/verification.md for the observed test record.

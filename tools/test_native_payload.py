@@ -2,6 +2,7 @@ import importlib.util
 import io
 import hashlib
 import os
+import struct
 from pathlib import Path
 import tarfile
 import tempfile
@@ -10,6 +11,22 @@ from unittest import mock
 
 spec=importlib.util.spec_from_file_location('native_payload',Path(__file__).with_name('native_payload.py'))
 native=importlib.util.module_from_spec(spec);spec.loader.exec_module(native)
+
+def elf_fixture(mask=3, descriptor=None, property_type=0xc0008002, duplicate_segment=False):
+    if descriptor is None:
+        descriptor = struct.pack('<III', property_type, 4, mask) + b'\0' * 4
+    note = struct.pack('<III', 4, len(descriptor), 5) + b'GNU\0' + descriptor
+    count = 2 if duplicate_segment else 1
+    header = bytearray(64)
+    header[:7] = b'\x7fELF\x02\x01\x01'
+    struct.pack_into('<HHI', header, 16, 2, 62, 1)
+    struct.pack_into('<Q', header, 32, 64)
+    struct.pack_into('<HHH', header, 52, 64, 56, count)
+    start = 64 + count * 56
+    segments = []
+    for kind in ([4, 0x6474e553] if duplicate_segment else [0x6474e553]):
+        segments.append(struct.pack('<IIQQQQQQ', kind, 4, start, 0, 0, len(note), len(note), 8))
+    return bytes(header) + b''.join(segments) + note
 
 class NativePayloadTests(unittest.TestCase):
     def test_deterministic_archive_contains_only_regular_files(self):
@@ -32,19 +49,39 @@ class NativePayloadTests(unittest.TestCase):
         with mock.patch.object(native,'capture',return_value=output):
             self.assertEqual(native.glibc_requirement([Path('server')]),'2.34')
     def test_elf_cpu_isa_enforces_declared_minimum_for_every_library(self):
-        baseline = 'Properties: x86 ISA needed: x86-64-baseline, x86-64-v2\n'
-        with mock.patch.object(native, 'capture', return_value=baseline):
-            self.assertEqual(native.verify_elf_cpu_isa([Path('llama-server')]), {'llama-server': 'x86-64-v2'})
-        for higher in ('x86-64-v3', 'x86-64-v4'):
-            def notes(command):
-                return baseline if Path(command[-1]).name == 'llama-server' else 'Properties: x86 ISA needed: '+higher+'\n'
-            with mock.patch.object(native, 'capture', side_effect=notes):
+        with tempfile.TemporaryDirectory() as directory:
+            binary,library = Path(directory)/'llama-server',Path(directory)/'libexample.so'
+            binary.write_bytes(elf_fixture(3, duplicate_segment=True))
+            # Verification must not depend on old/new/localized readelf output.
+            with mock.patch.object(native, 'capture', side_effect=AssertionError('readelf text must not be used')):
+                self.assertEqual(native.verify_elf_cpu_isa([binary]), {'llama-server': 'x86-64-v2'})
+            for mask,higher in ((4,'x86-64-v3'),(8,'x86-64-v4')):
+                library.write_bytes(elf_fixture(mask))
                 with self.assertRaisesRegex(ValueError, 'requires '+higher):
-                    native.verify_elf_cpu_isa([Path('llama-server'), Path('libexample.so')])
-        for unknown in ('', 'Properties: x86 ISA needed: <unknown: 10>\n'):
-            with mock.patch.object(native, 'capture', return_value=unknown):
-                with self.assertRaises(ValueError):
-                    native.verify_elf_cpu_isa([Path('llama-server')])
+                    native.verify_elf_cpu_isa([binary,library])
+            for mask in (0,16,19):
+                binary.write_bytes(elf_fixture(mask))
+                with self.assertRaisesRegex(ValueError, 'Unrecognized'):
+                    native.verify_elf_cpu_isa([binary])
+
+    def test_elf_cpu_isa_rejects_malformed_headers_ranges_and_properties(self):
+        malformed = []
+        wrong_class = bytearray(elf_fixture());wrong_class[4]=1;malformed.append(wrong_class)
+        wrong_machine = bytearray(elf_fixture());struct.pack_into('<H',wrong_machine,18,183);malformed.append(wrong_machine)
+        truncated_segment = bytearray(elf_fixture());struct.pack_into('<Q',truncated_segment,64+32,65536);malformed.append(truncated_segment)
+        truncated_note = bytearray(elf_fixture());struct.pack_into('<I',truncated_note,120+4,65536);malformed.append(truncated_note)
+        malformed.append(elf_fixture(descriptor=struct.pack('<II',0xc0008002,8)+b'\0'*8))
+        malformed.append(elf_fixture(descriptor=struct.pack('<III',0xc0008002,4,3)))  # missing eight-byte alignment padding
+        malformed.append(elf_fixture(descriptor=(struct.pack('<III',0xc0008002,4,3)+b'\0'*4)*2))
+        malformed.append(elf_fixture(property_type=0x1234))  # no ISA requirement property
+        malformed.extend((b'',b'not ELF',elf_fixture()[:-1]))
+        with tempfile.TemporaryDirectory() as directory:
+            binary=Path(directory)/'llama-server'
+            for content in malformed:
+                binary.write_bytes(content)
+                with self.subTest(size=len(content)):
+                    with self.assertRaises(ValueError):
+                        native.verify_elf_cpu_isa([binary])
     def test_failed_build_workspace_can_be_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, 'build failure'):
