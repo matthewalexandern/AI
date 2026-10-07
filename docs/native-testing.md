@@ -18,6 +18,18 @@ establish CUDA, Vulkan, GPU passthrough, GPU partitioning, or macOS compatibilit
 No desktop was accessed and no Windows feature was enabled by creating these
 scripts in the Linux cloud workspace. Platform-specific runs remain necessary.
 
+For the Windows desktop, run the PowerShell commands below locally, or connect
+that desktop as an explicitly configured self-hosted runner. Selecting Hyper-V
+in this chat does not connect a desktop terminal to the cloud task. Hyper-V
+enablement still runs only on that Windows machine and never restarts it
+automatically.
+
+The standard six-platform release workflow currently builds CPU payloads on all
+platforms and additionally includes Metal in macOS packages. It does **not**
+bundle CUDA or Vulkan in the Windows/Linux release installers. Build and validate
+those GPU variants using the separate manual workflow described below; merely
+passing `--backend cuda` to a CPU-only package cannot add CUDA support.
+
 The harness also has small protocol checks that do not change Hyper-V state:
 
 ```sh
@@ -201,8 +213,8 @@ Run this as an ordinary user; it does not enable Hyper-V or install GPU drivers.
   -ReportDirectory .\test-evidence\windows-cpu
 
 .\tools\hyperv\Invoke-WindowsHostTest.ps1 `
-  -Installer .\dist\mini-fabrics-installer-windows-amd64.exe `
-  -InstallerSHA256 $trustedWindowsInstallerSHA256 -Backend cuda `
+  -Installer .\gpu-candidate\mini-fabrics-installer-windows-amd64-cuda.exe `
+  -InstallerSHA256 $trustedCUDACandidateSHA256 -Backend cuda `
   -ReportDirectory .\test-evidence\windows-cuda
 ```
 
@@ -218,3 +230,88 @@ a GPU pass. Inspect `smoke.json` and `logs/smoke-*/runtime.log`; the report's
 `runtime_log` field identifies the log. `host-report.json` records the requested
 backend and whether the GPU evidence gate was required. Keep these artifacts
 alongside the release checksum and record the real host/driver in the test record.
+
+## Build a complete GPU candidate on its native host
+
+[gpu-smoke.yml](../.github/workflows/gpu-smoke.yml) is a manually dispatched build,
+package, and hardware-validation workflow. It replaces the earlier download-only
+GPU check. It builds from the checkout selected for dispatch; the native builder
+verifies the pinned llama.cpp source SHA256 and uses locked Go dependencies and
+the pinned Go toolchain. Dispatch trusted repository revisions on these hosts.
+
+Register the physical GPU machine as a self-hosted GitHub Actions runner for this
+repository. Keep its normal OS/architecture labels, and add
+`mini-fabrics-gpu-cuda`, `mini-fabrics-gpu-vulkan`, or `mini-fabrics-gpu-metal`
+according to the hardware being tested. The workflow schedules only a runner
+matching the selected OS, architecture, and backend label, then checks the actual
+host architecture before building. A queued job without a matching runner is
+waiting for hardware, not a completed platform test.
+
+| Candidate host | Prerequisites already installed on the host |
+| --- | --- |
+| Windows x64 CUDA | NVIDIA GPU/driver, supported CUDA toolkit including `nvcc`, CMake, Visual Studio C++ Build Tools; toolkit binaries visible to the runner |
+| Windows x64/ARM64 Vulkan | Supported GPU/driver, Vulkan SDK including `glslc`, CMake, native Visual Studio tools; ARM64 also requires `clang-cl` |
+| Alma/RHEL 9 x64/ARM64 CUDA or Vulkan | Python 3.9+ as `python3`, CMake, C/C++ toolchain and static GCC runtimes, binutils, GPU driver and matching toolkit/SDK |
+| macOS x64/ARM64 Metal | Apple hardware with a real Metal device, macOS 13+, Xcode Command Line Tools/Swift, CMake |
+
+The workflow provisions its pinned Go compiler, and Python on Windows/macOS. The
+Linux host supplies Python directly, avoiding assumptions that hosted Ubuntu
+Python binaries work on RHEL. Linux GPU builds retain the glibc 2.34 baseline. Use the frozen signed AlmaLinux 9.0 compiler repositories shown in the native workflow; newer rolling GCC packages can import backported libc symbols. Strict binary validation catches this;
+building on a newer distribution and relabelling it RHEL-compatible is rejected.
+CUDA on macOS and Windows ARM64 is not offered. macOS uses the Metal path.
+
+Configure the **runner process environment** variable
+`MINI_FABRICS_GPU_LICENSES` with a JSON array of absolute paths to authoritative
+redistribution license/notice files for every bundled native dependency. For
+CUDA, include the applicable NVIDIA CUDA redistribution terms and notices; for
+Vulkan, include the loader and any other redistributed library licenses. Supply
+real files from the installed SDK/vendor distribution. Merely supplying a file
+does not establish redistribution rights; the host operator must verify coverage
+for the actual dependency inventory.
+
+For example, construct the JSON in PowerShell from verified local paths before
+starting the runner:
+
+```powershell
+# Replace these variables with actual authoritative license-file paths.
+$env:MINI_FABRICS_GPU_LICENSES = ConvertTo-Json -Compress -InputObject @($cudaLicensePath, $additionalNoticePath)
+```
+
+For a service runner, configure that service's environment and restart the runner
+service so it receives the value. A variable in an unrelated terminal is not
+injected into an already running service. CUDA/Vulkan builds fail early when
+license files are absent. The workflow passes each file through
+`--dependency-license`; the resulting payload includes the texts and hashes.
+Metal uses system frameworks and needs no additional native dependency license
+unless the actual build introduces another redistributable.
+
+In GitHub Actions, select **Build and verify GPU release candidate (self-hosted)**,
+choose the real OS, architecture, backend, catalog model, and compiler-job limit,
+then run the workflow. GPT-OSS 20B is available when the CPU and GPU capacity estimates allow it; Qwen provides a smaller installation test. It builds both CPU and the selected GPU backend, packages
+their binaries and dependency closure into one installer, verifies package
+checksums, and performs fresh CPU and GPU installations. Runtime subprocesses
+receive ordinary OS executable paths without development SDK paths or dynamic
+library-path overrides. Drivers remain a host prerequisite. Both installations
+must pass memory/persistence/shutdown smoke; GPU smoke additionally requires
+positive offload on the selected backend.
+
+Every completed attempt retains a `gpu-evidence-*` artifact with available
+build/install logs, runtime logs, native device information, and the workflow report. Only a
+successful attempt uploads `gpu-candidate-*`, containing:
+
+- `mini-fabrics-installer-<os>-<arch>-<backend>[.exe]`, the complete single installer;
+- `SHA256SUMS`, native dependency/build provenance, and release provenance;
+- `gpu-validation.json`, identifying the tested commit, model, hardware, and
+  positive offload evidence.
+
+The backend suffix keeps candidate names distinct from the standard CPU/Metal
+release artifacts. This workflow has read-only repository permissions and never
+publishes or updates a GitHub release. Review the candidate checksums, dependency
+licenses, and recorded hardware coverage before a separate manual prerelease or
+release-publication action. It does not insert untested CUDA/Vulkan payloads into
+the six-platform release workflow. Successful testing covers the recorded GPU
+and driver, not every device supported in principle by that backend.
+
+The workflow definition and local protocol checks are prepared here. A genuine
+CUDA, Vulkan, or Metal result requires dispatching onto the corresponding native
+hardware; the Linux cloud task has not produced such a result.

@@ -260,12 +260,36 @@ def deterministic_archive(directory):
     return compressed.getvalue()
 
 
+def copy_vendor_notices(source, licenses):
+    vendor = source / "vendor"
+    for path in sorted(vendor.rglob("*")):
+        if path.is_file() and path.name.upper().startswith(("LICENSE", "COPYING", "NOTICE", "UNLICENSE")):
+            name = path.relative_to(vendor).as_posix().replace("/", "-")
+            shutil.copy2(path, licenses / ("llama-vendor-" + name))
+    # These single-header dependencies carry their full notices inside the header.
+    for relative in ("stb/stb_image.h", "miniaudio/miniaudio.h"):
+        text = (vendor / relative).read_text(encoding="utf-8")
+        start = text.rfind("/*")
+        notice = text[start:] if start >= 0 else ""
+        if "Permission is hereby granted" not in notice or "copyright" not in notice.lower():
+            raise ValueError("Cannot identify authoritative embedded vendor license: " + relative)
+        (licenses / ("llama-vendor-" + relative.replace("/", "-") + "-LICENSE")).write_text(notice, encoding="utf-8")
+    # nlohmann identifies MIT and its copyright in SPDX headers. Include both
+    # that original attribution and the standard MIT permission/warranty text.
+    attribution = "\n".join((vendor / "nlohmann/json.hpp").read_text(encoding="utf-8").splitlines()[:8])
+    if "SPDX-License-Identifier: MIT" not in attribution:
+        raise ValueError("Pinned JSON vendor no longer declares the expected MIT license")
+    terms = (source / "LICENSE").read_text(encoding="utf-8").split("Permission is hereby granted", 1)[1]
+    (licenses / "llama-vendor-nlohmann-MIT-LICENSE").write_text(attribution + "\n\nPermission is hereby granted" + terms, encoding="utf-8")
+
+
 def copy_licenses(payload, source, go, extras):
     licenses = payload / "licenses"
     licenses.mkdir()
     shutil.copy2(ROOT / "LICENSE", licenses / "mini-fabrics-LICENSE")
     shutil.copy2(Path(capture([go, "env", "GOROOT"])) / "LICENSE", licenses / "Go-LICENSE")
     shutil.copy2(source / "LICENSE", licenses / "llama.cpp-LICENSE")
+    copy_vendor_notices(source, licenses)
     # Inventory Go module license texts from the exact locked build cache.
     text = capture([go, "list", "-mod=readonly", "-m", "-json", "all"])
     decoder, offset = json.JSONDecoder(), 0
