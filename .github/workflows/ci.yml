@@ -2,7 +2,9 @@ name: Mini Fabrics tests
 on:
   push:
     branches: ['**']
+    paths-ignore: ["docs/**", "README.md"]
   pull_request:
+    paths-ignore: ["docs/**", "README.md"]
   workflow_call:
 permissions:
   contents: read

@@ -23,8 +23,12 @@ def request(base, path, payload=None, timeout=300):
     req = urllib.request.Request(base + path, data=data, headers=headers)
     # Local inference must never be routed through a configured HTTP proxy.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=timeout) as response:
-        return json.load(response)
+    try:
+        with opener.open(req, timeout=timeout) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        detail = error.read(65536).decode("utf-8", errors="replace")
+        raise RuntimeError(f"Local API {path} returned HTTP {error.code}: {detail}") from error
 
 
 MODES = ("adaptive", "fast", "balanced", "deep")
@@ -212,7 +216,7 @@ def check_process_group_shutdown(process, timeout=5):
         time.sleep(0.05)
 
 
-def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=None, require_gpu=False, startup_timeout=240):
+def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=None, require_gpu=False, startup_timeout=240, turn_timeout=300):
     if mode not in MODES:
         raise ValueError("Cognition mode must be adaptive, fast, balanced, or deep")
     if not math.isfinite(startup_timeout) or not 10 <= startup_timeout <= 900:
@@ -243,7 +247,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
         process_options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
         log_path = retained_log_path(log_directory)
         with log_path.open("wb") as log:
-            process = subprocess.Popen([str(runtime), "--home", str(isolated), "serve", "--listen", f"127.0.0.1:{api_port}", "--startup-timeout", f"{startup_timeout:g}s"], stdout=log, stderr=subprocess.STDOUT, **process_options)
+            process = subprocess.Popen([str(runtime), "--home", str(isolated), "serve", "--listen", f"127.0.0.1:{api_port}", "--startup-timeout", f"{startup_timeout:g}s", "--turn-timeout", f"{turn_timeout:g}s"], stdout=log, stderr=subprocess.STDOUT, **process_options)
             try:
                 startup_begin = time.monotonic()
                 deadline = startup_begin + startup_timeout
@@ -253,7 +257,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
                     try:
                         if request(base, "/health", timeout=2).get("status") == "ok":
                             break
-                    except (OSError, urllib.error.URLError):
+                    except (OSError, urllib.error.URLError, RuntimeError):
                         pass
                     time.sleep(0.2)
                 else:
@@ -265,11 +269,11 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
                 evidence = backend_evidence(configuration, log_path.read_text(encoding="utf-8", errors="replace"), expected_backend, require_gpu)
                 evidence["readiness_seconds"] = round(time.monotonic() - startup_begin, 3)
 
-                arithmetic = request(base, "/v1/chat", {"session": "arithmetic", "input": "What is 2 + 2? Give one short sentence."})
+                arithmetic = request(base, "/v1/chat", {"session": "arithmetic", "input": "What is 2 + 2? Give one short sentence."}, timeout=turn_timeout + 30)
                 model_quality_warnings = check_arithmetic(arithmetic, mode)
 
                 memory = request(base, "/v1/memory", {"content": "The user's favorite planet is Neptune."})
-                recall = request(base, "/v1/chat", {"session": "recall", "input": "What is my favorite planet? Use my saved preference and answer briefly."})
+                recall = request(base, "/v1/chat", {"session": "recall", "input": "What is my favorite planet? Use my saved preference and answer briefly."}, timeout=turn_timeout + 30)
                 check_result(recall, mode)
                 if "neptune" not in recall["answer"].lower():
                     raise AssertionError("The model failed to use its saved memory")
@@ -320,8 +324,11 @@ def main():
     parser.add_argument("--expect-backend", choices=BACKENDS, help="require the configured and observed inference backend to match")
     parser.add_argument("--require-gpu", action="store_true", help="require positive GPU layer offload and matching GPU model buffers")
     parser.add_argument("--startup-timeout", type=float, default=240, help="model startup deadline in seconds, from 10 to 900 (default: 240)")
+    parser.add_argument("--turn-timeout", type=int, default=300, help="per-turn inference deadline in seconds (10..3600)")
     args = parser.parse_args()
-    result = smoke(args.runtime, args.home, args.mode, args.log_directory, args.expect_backend, args.require_gpu, args.startup_timeout)
+    if not 10 <= args.turn_timeout <= 3600:
+        parser.error("turn-timeout must be between 10 and 3600 seconds")
+    result = smoke(args.runtime, args.home, args.mode, args.log_directory, args.expect_backend, args.require_gpu, args.startup_timeout, args.turn_timeout)
     encoded = json.dumps(result, indent=2) + "\n"
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

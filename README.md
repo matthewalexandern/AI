@@ -62,7 +62,7 @@ Adaptive scheduling uses request structure, length, recalled evidence, and histo
 | Balanced | Answer and assessment, with at most one revision/reassessment; maximum four calls | JSON Schema constrained and application validated. |
 | Deep | Outline, answer, assessment, with at most one revision/reassessment; maximum five calls | Same bounded validation. |
 
-JSON results include `assessed` and the scheduling `decision`: requested/selected modes, reason, call budget, actual calls, phases, and duration. Episodes persist the same metadata. Model confidence never selects the workflow or triggers escalation. Failed, canceled, truncated, or malformed turns save no partial conversation. Ctrl+C stops the owned inference child; Unix also handles SIGTERM. `--startup-timeout 240s` permits slower model loading.
+JSON results include `assessed` and the scheduling `decision`: requested/selected modes, reason, call budget, actual calls, phases, and duration. Episodes persist the same metadata. Model confidence never selects the workflow or triggers escalation. Failed, canceled, truncated, or malformed turns save no partial conversation. Ctrl+C stops the owned inference child; Unix also handles SIGTERM. `--startup-timeout 240s` permits slower model loading. Turns default to five minutes; `--turn-timeout 15m` allows slower CPU workflows (bounded from 10 seconds to 60 minutes). Large models on portable CPU builds can take minutes per phase; GPU validation is separate.
 
 ## Memory management
 

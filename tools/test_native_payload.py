@@ -39,7 +39,8 @@ class NativePayloadTests(unittest.TestCase):
                     raise ValueError('build failure')
             self.assertEqual((stage / 'diagnostic').read_bytes(), b'ELF')
             with native.build_workspace(Path(directory)) as cleaned:
-                (cleaned / 'temporary').touch()
+                (cleaned / 'temporary').write_bytes(b'readonly notice')
+                (cleaned / 'temporary').chmod(0o444)
             self.assertFalse(cleaned.exists())
     def test_source_archive_rejects_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -58,6 +59,16 @@ class NativePayloadTests(unittest.TestCase):
             (root/'cmd/fabrics/main.go').write_text('new implementation')
             with self.assertRaisesRegex(ValueError,'changed during'):
                 native.verify_source_state(locked,root)
+
+    def test_explicit_clang_compiler_cache_has_supported_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build=Path(directory)
+            (build/'CMakeCache.txt').write_text('CMAKE_CXX_COMPILER:STRING=C:/LLVM/bin/clang-cl.exe\n')
+            process=mock.Mock(stdout='clang version 20; target aarch64-pc-windows-msvc')
+            with mock.patch.object(native.subprocess,'run',return_value=process):
+                record=native.compiler_provenance(build)
+            self.assertEqual(record['executable'],'C:/LLVM/bin/clang-cl.exe')
+            self.assertIn('aarch64',record['version_output'])
 
     def test_download_closes_file_before_publication(self):
         data=b'verified source'

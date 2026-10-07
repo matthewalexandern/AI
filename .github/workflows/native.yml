@@ -4,7 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [mini-fabrics-v0.1.0]
+    paths-ignore: ["docs/**", "README.md"]
   pull_request:
+    paths-ignore: ["docs/**", "README.md"]
 permissions:
   contents: read
 concurrency:
@@ -57,7 +59,7 @@ jobs:
         run: |
           home="$RUNNER_TEMP/mini-fabrics"
           mkdir -p "$home"
-          env PATH=/usr/bin:/bin ./clean-installers/mini-fabrics-installer-${{ matrix.target }} --prefix "$home" --backend cpu --model qwen2.5-0.5b --non-interactive
+          env PATH=/usr/bin:/bin ./clean-installers/mini-fabrics-installer-${{ matrix.target }} --prefix "$home" --backend cpu --model qwen2.5-1.5b --non-interactive
           python3 tools/smoke.py --runtime "$home/bin/fabrics" --home "$home" --expect-backend cpu --log-directory native-logs-${{ matrix.target }} --report native-smoke-${{ matrix.target }}.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -115,7 +117,7 @@ jobs:
               ! command -v go
               ! command -v cmake
               ! command -v c++
-              /work/clean-installers/mini-fabrics-installer-$NATIVE_TARGET --prefix /home/mini-fabrics --backend cpu --model qwen2.5-0.5b --non-interactive
+              /work/clean-installers/mini-fabrics-installer-$NATIVE_TARGET --prefix /home/mini-fabrics --backend cpu --model qwen2.5-1.5b --non-interactive
               python3 tools/smoke.py --runtime /home/mini-fabrics/bin/fabrics --home /home/mini-fabrics --expect-backend cpu --report /home/evidence.json
             '
           done
@@ -169,7 +171,7 @@ jobs:
         run: |
           python_path="$(command -v python)"
           home="$RUNNER_TEMP/mini-fabrics"
-          env PATH=/usr/bin:/bin ./clean-installers/mini-fabrics-installer-${{ matrix.target }} --prefix "$home" --backend cpu --model qwen2.5-0.5b --non-interactive
+          env PATH=/usr/bin:/bin ./clean-installers/mini-fabrics-installer-${{ matrix.target }} --prefix "$home" --backend cpu --model qwen2.5-1.5b --non-interactive
           "$python_path" tools/smoke.py --runtime "$home/bin/fabrics" --home "$home" --expect-backend cpu --log-directory native-logs-${{ matrix.target }} --report native-smoke-${{ matrix.target }}.json
       - name: Native Windows compiler-free CPU smoke
         if: runner.os == 'Windows'
@@ -178,7 +180,7 @@ jobs:
           $python = (Get-Command python).Source
           $homePath = Join-Path $env:RUNNER_TEMP 'mini-fabrics'
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
-          & ".\clean-installers\mini-fabrics-installer-${{ matrix.target }}.exe" --prefix $homePath --backend cpu --model qwen2.5-0.5b --non-interactive
+          & ".\clean-installers\mini-fabrics-installer-${{ matrix.target }}.exe" --prefix $homePath --backend cpu --model qwen2.5-1.5b --non-interactive
           if ($LASTEXITCODE -ne 0) { throw 'Native installer failed' }
           & $python tools/smoke.py --runtime "$homePath\bin\fabrics.exe" --home $homePath --expect-backend cpu --log-directory native-logs-${{ matrix.target }} --report native-smoke-${{ matrix.target }}.json
           if ($LASTEXITCODE -ne 0) { throw 'Native inference smoke failed' }

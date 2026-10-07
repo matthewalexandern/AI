@@ -230,7 +230,10 @@ def glibc_requirement(files):
 
 @contextmanager
 def build_workspace(parent, keep=False):
-    stage = Path(tempfile.mkdtemp(prefix=".native-", dir=parent))
+    # TemporaryDirectory handles read-only Go module notices on Windows during
+    # cleanup; a plain shutil.rmtree masks successful builds with WinError 5.
+    temporary = None if keep else tempfile.TemporaryDirectory(prefix=".native-", dir=parent)
+    stage = Path(tempfile.mkdtemp(prefix=".native-", dir=parent) if keep else temporary.name)
     print("Native build workspace:", stage, flush=True)
     try:
         yield stage
@@ -238,7 +241,7 @@ def build_workspace(parent, keep=False):
         if keep:
             print("Preserved native build workspace:", stage, flush=True)
         else:
-            shutil.rmtree(stage)
+            temporary.cleanup()
 
 
 def deterministic_archive(directory):
@@ -322,7 +325,7 @@ def copy_licenses(payload, source, go, extras):
 
 def compiler_provenance(builddir):
     cache = (builddir / "CMakeCache.txt").read_text()
-    match = re.search(r"^CMAKE_CXX_COMPILER:FILEPATH=(.+)$", cache, re.M)
+    match = re.search(r"^CMAKE_CXX_COMPILER:(?:FILEPATH|STRING|UNINITIALIZED)=(.+)$", cache, re.M)
     if not match:
         raise ValueError("CMake did not record a native C++ compiler")
     compiler = match.group(1)

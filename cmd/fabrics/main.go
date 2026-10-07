@@ -122,6 +122,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errs io.Writer) 
 	listen := f.String("listen", "127.0.0.1:8080", "loopback API address")
 	mode := f.String("mode", "", "adaptive, fast, balanced, or deep (default: configured mode)")
 	startupTimeout := f.Duration("startup-timeout", 2*time.Minute, "maximum model loading time (10s..15m)")
+	turnTimeout := f.Duration("turn-timeout", 5*time.Minute, "maximum cognitive turn duration (10s..60m)")
 	if err := f.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -151,6 +152,10 @@ func run(ctx context.Context, args []string, in io.Reader, out, errs io.Writer) 
 	if *startupTimeout < 10*time.Second || *startupTimeout > 15*time.Minute {
 		return errors.New("startup-timeout must be between 10s and 15m")
 	}
+	if *turnTimeout < 10*time.Second || *turnTimeout > time.Hour {
+		return errors.New("turn-timeout must be between 10s and 60m")
+	}
+	ctx = context.WithValue(ctx, turnTimeoutKey{}, *turnTimeout)
 	cfg, err := config.Load(*home)
 	if err != nil {
 		return err
@@ -314,8 +319,17 @@ func memoryCommand(ctx context.Context, home, command string, args []string, out
 	return nil
 }
 
+type turnTimeoutKey struct{}
+
+func turnDuration(ctx context.Context) time.Duration {
+	if duration, ok := ctx.Value(turnTimeoutKey{}).(time.Duration); ok && duration > 0 {
+		return duration
+	}
+	return 5 * time.Minute
+}
+
 func turn(ctx context.Context, c *cognition.Controller, session, input string) (cognition.Result, error) {
-	timed, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	timed, cancel := context.WithTimeout(ctx, turnDuration(ctx))
 	defer cancel()
 	return c.Run(timed, session, input)
 }
@@ -364,7 +378,7 @@ func serve(ctx context.Context, addr string, c *cognition.Controller, store *mem
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: apiHandler(c, store, engine.BaseURL()), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 6 * time.Minute, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
+	server := &http.Server{Handler: apiHandler(c, store, engine.BaseURL()), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: turnDuration(ctx) + time.Minute, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	fmt.Fprintln(out, "Mini Fabrics API listening on", listener.Addr().String())
