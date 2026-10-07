@@ -39,6 +39,18 @@ def print_diagnostic(message):
     print(message.encode(encoding, errors="backslashreplace").decode(encoding), flush=True)
 
 
+def retained_log_path(log_directory):
+    # Logs must outlive the isolated runtime home even when setup, inference,
+    # shutdown, or database reopening raises. Never overwrite another run.
+    if log_directory is None:
+        directory = Path(tempfile.mkdtemp(prefix="mini-fabrics-smoke-logs-"))
+    else:
+        base = Path(log_directory).resolve()
+        base.mkdir(parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="smoke-", dir=base))
+    return directory / "runtime.log"
+
+
 def check_result(result, expected_mode=None):
     if not isinstance(result.get("answer"), str) or not result["answer"].strip():
         raise AssertionError("The model did not produce an answer")
@@ -229,13 +241,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
         (isolated / "config.json").write_text(json.dumps(configuration), encoding="utf-8")
         base = f"http://127.0.0.1:{api_port}"
         process_options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-        log_path = isolated / "runtime.log"
-        if log_directory is not None:
-            log_directory = Path(log_directory).resolve()
-            log_directory.mkdir(parents=True, exist_ok=True)
-            # Keep every run, including failures, without overwriting previous
-            # evidence or mixing logs from different backend/model checks.
-            log_path = Path(tempfile.mkdtemp(prefix="smoke-", dir=log_directory)) / "runtime.log"
+        log_path = retained_log_path(log_directory)
         with log_path.open("wb") as log:
             process = subprocess.Popen([str(runtime), "--home", str(isolated), "serve", "--listen", f"127.0.0.1:{api_port}", "--startup-timeout", f"{startup_timeout:g}s"], stdout=log, stderr=subprocess.STDOUT, **process_options)
             try:
@@ -281,8 +287,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
             except Exception:
                 log.flush()
                 print_diagnostic(log_path.read_text(encoding="utf-8", errors="replace")[-6000:])
-                if log_directory is not None:
-                    print_diagnostic(f"Preserved runtime log: {log_path}")
+                print_diagnostic(f"Preserved runtime log: {log_path}")
                 raise
             finally:
                 stop(process)
@@ -301,7 +306,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
             raise AssertionError("Persisted turn changed after reopening the database")
         return {"status": "passed_with_model_warnings" if model_quality_warnings else "passed", "runtime_checks": "passed", "model_quality_warnings": model_quality_warnings,
                 "model": Path(configuration["model_path"]).name, "mode": mode, "backend": configured_backend,
-                "backend_evidence": evidence, "hardware_tested": evidence["hardware_tested"], "runtime_log": str(log_path) if log_directory is not None else None,
+                "backend_evidence": evidence, "hardware_tested": evidence["hardware_tested"], "runtime_log": str(log_path),
                 "arithmetic": arithmetic, "recall": recall, "persisted_turn": episodes[0], "shutdown": shutdown, "reopen": "persisted turn unchanged"}
 
 
@@ -311,7 +316,7 @@ def main():
     parser.add_argument("--home", required=True, type=Path)
     parser.add_argument("--report", type=Path)
     parser.add_argument("--mode", choices=MODES, default="balanced", help="cognition mode in an isolated configuration (default: balanced, including assessment)")
-    parser.add_argument("--log-directory", type=Path, help="retain each run's runtime.log in a unique subdirectory, including failed runs")
+    parser.add_argument("--log-directory", type=Path, help="directory for retained runtime logs (default: a separate persistent system-temporary directory)")
     parser.add_argument("--expect-backend", choices=BACKENDS, help="require the configured and observed inference backend to match")
     parser.add_argument("--require-gpu", action="store_true", help="require positive GPU layer offload and matching GPU model buffers")
     parser.add_argument("--startup-timeout", type=float, default=240, help="model startup deadline in seconds, from 10 to 900 (default: 240)")

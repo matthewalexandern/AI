@@ -1,10 +1,12 @@
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -19,8 +21,25 @@ class DiagnosticEncodingTests(unittest.TestCase):
         console = io.TextIOWrapper(encoded, encoding="cp1252", write_through=True)
         with mock.patch.object(smoke.sys, "stdout", console):
             smoke.print_diagnostic("Model path: C:\\Users\\名字\\café.gguf")
-        self.assertEqual(encoded.getvalue().decode("cp1252"), "Model path: C:\\Users\\\\u540d\\u5b57\\café.gguf\n")
+        self.assertEqual(encoded.getvalue().decode("cp1252").splitlines(), ["Model path: C:\\Users\\\\u540d\\u5b57\\café.gguf"])
         console.detach()
+
+    def test_failed_startup_retains_full_log_without_explicit_log_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "installed"
+            home.mkdir()
+            (home / "config.json").write_text(json.dumps({"backend": "cpu", "model_path": "fixture.gguf"}), encoding="utf-8")
+            # Python rejects the runtime CLI's --home flag and exits promptly.
+            # This exercises a real child failure and isolated-home cleanup on
+            # every OS without needing an installed model or a shell wrapper.
+            with mock.patch.object(smoke.tempfile, "tempdir", str(root)), mock.patch.object(smoke.sys, "stdout", io.StringIO()):
+                with self.assertRaisesRegex(AssertionError, "exited before readiness"):
+                    smoke.smoke(sys.executable, home, startup_timeout=10)
+            retained = list(root.glob("mini-fabrics-smoke-logs-*/runtime.log"))
+            self.assertEqual(len(retained), 1)
+            self.assertIn("--home", retained[0].read_text(encoding="utf-8", errors="replace"))
+            self.assertEqual(set(root.iterdir()), {home, retained[0].parent})
 
 
 class ModelResultTests(unittest.TestCase):
@@ -75,6 +94,14 @@ class BackendEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["hardware_tested"], "CPU inference; no GPU offload")
         with self.assertRaisesRegex(AssertionError, "configured GPU backend"):
             smoke.backend_evidence({"backend": "cpu"}, self.cpu, require_gpu=True)
+
+    def test_timestamped_v06_trace_logs_preserve_positive_cpu_proof(self):
+        log = "0.00.009.001 I load_backend: loaded CPU backend from /native/libggml-cpu.dylib\n0.00.912.875 I load_tensors:   CPU_Mapped model buffer size =   379.81 MiB\n0.01.585.606 I srv  llama_server: model loaded\n"
+        evidence = smoke.backend_evidence({"backend": "cpu"}, log, "cpu")
+        self.assertEqual(evidence["model_buffers"], [{"name": "CPU_Mapped", "mib": 379.81}])
+        self.assertEqual(evidence["hardware_tested"], "CPU inference; no GPU offload")
+        with self.assertRaisesRegex(AssertionError, "loaded CPU model buffer"):
+            smoke.backend_evidence({"backend": "cpu"}, "0.01.585.606 I srv  llama_server: model loaded\n", "cpu")
 
     def test_each_gpu_requires_positive_layers_and_matching_buffers(self):
         for backend in ("cuda", "metal", "vulkan"):

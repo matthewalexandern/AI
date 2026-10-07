@@ -64,7 +64,7 @@ func helperServer(mode string) {
 			i++
 		}
 	}
-	if args["--host"] != "127.0.0.1" || args["--alias"] != "local" || args["--parallel"] != "1" || args["--model"] == "" || args["--jinja"] != "true" || args["--reasoning-format"] != "deepseek" {
+	if args["--host"] != "127.0.0.1" || args["--alias"] != "local" || args["--parallel"] != "1" || args["--model"] == "" || args["--jinja"] != "true" || args["--reasoning-format"] != "deepseek" || args["--log-verbosity"] != "4" {
 		fmt.Fprintln(os.Stderr, "invalid child invocation")
 		os.Exit(4)
 	}

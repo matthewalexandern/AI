@@ -40,6 +40,24 @@ def sha256(path):
     return h.hexdigest()
 
 
+def source_state(root=ROOT):
+    runtime_files = {p.relative_to(root).as_posix(): sha256(p)
+                     for directory in (root / "cmd/fabrics", root / "internal")
+                     for p in sorted(directory.rglob("*.go"))
+                     if not p.name.endswith("_test.go")}
+    native_files = {p.relative_to(root).as_posix(): sha256(p)
+                    for p in sorted((root / "native").rglob("*.swift"))}
+    return {"go_mod_sha256": sha256(root / "go.mod"),
+            "go_sum_sha256": sha256(root / "go.sum"),
+            "model_catalog_sha256": sha256(root / "installer/models.json"),
+            "runtime_source_files": runtime_files, "native_source_files": native_files}
+
+
+def verify_source_state(expected, root=ROOT):
+    if source_state(root) != expected:
+        raise ValueError("Runtime source or locked inputs changed during the native build; rebuild from a stable checkout")
+
+
 def host_target():
     systems = {"Linux": "linux", "Darwin": "darwin", "Windows": "windows"}
     arches = {"x86_64": "amd64", "AMD64": "amd64", "aarch64": "arm64", "arm64": "arm64", "ARM64": "arm64"}
@@ -71,19 +89,22 @@ def source_archive(cache, supplied):
         return archive
     if supplied:
         raise ValueError("Supplied llama source archive failed pinned SHA256 verification")
-    with tempfile.NamedTemporaryFile(dir=cache, prefix=".download-", delete=False) as f:
-        temporary = Path(f.name)
-        try:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=cache, prefix=".download-", delete=False) as f:
+            temporary = Path(f.name)
             request = urllib.request.Request(LLAMA_URL, headers={"User-Agent": "Mini-Fabrics-Native-Builder/0.1.0"})
             with urllib.request.build_opener(HTTPSRedirect()).open(request, timeout=120) as response:
                 if response.url.split(":", 1)[0] != "https":
                     raise ValueError("Source download redirected away from HTTPS")
                 shutil.copyfileobj(response, f)
             f.flush()
-            if sha256(temporary) != LLAMA_SHA256:
-                raise ValueError("Downloaded llama source failed pinned SHA256 verification")
-            os.replace(temporary, archive)
-        finally:
+        # Windows refuses both rename and unlink while the file remains open.
+        if sha256(temporary) != LLAMA_SHA256:
+            raise ValueError("Downloaded llama source failed pinned SHA256 verification")
+        os.replace(temporary, archive)
+    finally:
+        if temporary is not None:
             temporary.unlink(missing_ok=True)
     return archive
 
@@ -266,7 +287,11 @@ def copy_licenses(payload, source, go, extras):
         shutil.copy2(file, licenses / ("native-dependency-" + str(index) + "-" + Path(file).name))
     # GCC static runtime exception and notices are part of the redistribution.
     if platform.system() == "Linux":
-        for path in [Path("/usr/share/doc/gcc-14-base/copyright"), Path("/usr/share/licenses/gcc/COPYING.RUNTIME"), Path("/usr/share/licenses/libstdc++/COPYING.RUNTIME")]:
+        gcc_notices = [Path("/usr/share/doc/gcc-14-base/copyright")]
+        for directory in (Path("/usr/share/licenses/gcc"), Path("/usr/share/licenses/libstdc++")):
+            if directory.is_dir():
+                gcc_notices.extend(p for p in directory.iterdir() if p.name.startswith(("COPYING", "LICENSE")))
+        for path in gcc_notices:
             if path.is_file():
                 shutil.copy2(path, licenses / ("gcc-" + path.parent.name + "-" + path.name))
 
@@ -300,6 +325,7 @@ def build(args):
         extract_source(archive, source)
         (payload / "bin").mkdir(parents=True)
         suffix = ".exe" if goos == "windows" else ""
+        locked_source = source_state()
         environment = dict(os.environ, CGO_ENABLED="0", GOOS=goos, GOARCH=goarch, GOAMD64="v1", GOARM64="v8.0", GOTOOLCHAIN="local", SOURCE_DATE_EPOCH="0")
         run([go, "build", "-mod=readonly", "-buildvcs=false", "-trimpath", "-ldflags=-s -w -X main.version=" + VERSION, "-o", payload / "bin" / ("fabrics" + suffix), "./cmd/fabrics"], cwd=ROOT, env=environment)
         backends = list(dict.fromkeys(args.backends.split(",")))
@@ -311,6 +337,9 @@ def build(args):
         for backend in backends:
             builddir = stage / ("build-" + backend)
             flags = ["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF", "-DGGML_STATIC=OFF", "-DGGML_NATIVE=OFF", "-DGGML_OPENMP=OFF", "-DGGML_AVX=OFF", "-DGGML_AVX2=OFF", "-DGGML_FMA=OFF", "-DGGML_F16C=OFF", "-DLLAMA_BUILD_SERVER=ON", "-DLLAMA_BUILD_TESTS=OFF", "-DLLAMA_OPENSSL=OFF", "-DLLAMA_BUILD_UI=OFF", "-DLLAMA_USE_PREBUILT_UI=OFF", "-DLLAMA_SUBPROCESS=OFF", "-DGGML_CUDA=OFF", "-DGGML_METAL=OFF", "-DGGML_VULKAN=OFF", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=$ORIGIN", "-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=OFF"]
+            # Extracted upstream sources may live inside the application checkout.
+            # Never let Git discovery report the application's commit as llama's.
+            flags += ["-DLLAMA_BUILD_COMMIT=" + LLAMA_COMMIT, "-DLLAMA_BUILD_NUMBER=11429"]
             if backend != "cpu":
                 flags.append("-DGGML_" + backend.upper() + "=ON")
             if backend == "metal":
@@ -364,9 +393,11 @@ def build(args):
             run(["xcrun", "swiftc", "-O", "-framework", "Foundation", "-framework", "Metal", helper, "-o", payload / "bin/fabrics-system-info"], env=swift_env)
             json.loads(capture([payload / "bin/fabrics-system-info"]))
         copy_licenses(payload, source, go, args.dependency_license)
+        verify_source_state(locked_source)
         files = {p.relative_to(payload).as_posix(): sha256(p) for p in sorted(payload.rglob("*")) if p.is_file()}
         archive_data = deterministic_archive(payload)
         manifest = {"format_version": 1, "version": VERSION, "platform": goos + "/" + goarch, "backends": backends, "default_backend": "cpu", "backend_paths": paths, "files": files, "archive_sha256": hashlib.sha256(archive_data).hexdigest(), "llama_commit": LLAMA_COMMIT, "llama_source_sha256": LLAMA_SHA256, "go_version": capture([go, "version"]), "go_sum_sha256": sha256(ROOT / "go.sum"), "go_mod_sha256": sha256(ROOT / "go.mod"), "runtime_source_files": {p.relative_to(ROOT).as_posix(): sha256(p) for d in (ROOT / "cmd/fabrics", ROOT / "internal") for p in sorted(d.rglob("*.go")) if not p.name.endswith("_test.go")}, "model_catalog_sha256": sha256(ROOT / "installer/models.json"), "cpu_isa": "portable baseline; no host-native AVX/FMA", "dependencies": dependencies, "glibc_minimum": glibc, "macos_minimum": "13.0" if goos == "darwin" else None, "cmake_version": capture([args.cmake, "--version"]).splitlines()[0], "compilers": compiler_records, "build_flags": build_flags, "source_date_epoch": 0, "driver_requirements": [x for x in backends if x in ("cuda", "vulkan")]}
+        manifest.update(locked_source)
         archive_dest, manifest_dest = args.output / (target + ".tar.gz"), args.output / (target + ".json")
         (stage / archive_dest.name).write_bytes(archive_data)
         (stage / manifest_dest.name).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

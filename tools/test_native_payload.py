@@ -1,5 +1,7 @@
 import importlib.util
 import io
+import hashlib
+import os
 from pathlib import Path
 import tarfile
 import tempfile
@@ -46,6 +48,36 @@ class NativePayloadTests(unittest.TestCase):
                 entry=tarfile.TarInfo('root/../outside');entry.size=1;archive.addfile(entry,io.BytesIO(b'x'))
             with self.assertRaisesRegex(ValueError,'Unsafe'):
                 native.extract_source(path,Path(directory)/'out')
+    def test_provenance_rejects_source_mutation_during_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            for name in ('go.mod','go.sum','installer/models.json','cmd/fabrics/main.go','native/macos/SystemInfo.swift'):
+                file=root/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text('locked input')
+            locked=native.source_state(root)
+            native.verify_source_state(locked,root)
+            (root/'cmd/fabrics/main.go').write_text('new implementation')
+            with self.assertRaisesRegex(ValueError,'changed during'):
+                native.verify_source_state(locked,root)
+
+    def test_download_closes_file_before_publication(self):
+        data=b'verified source'
+        handles=[]
+        real_named_temporary=native.tempfile.NamedTemporaryFile
+        real_replace=os.replace
+        def opened(*args,**kwargs):
+            file=real_named_temporary(*args,**kwargs);handles.append(file);return file
+        def publish(source,destination):
+            self.assertTrue(handles[-1].closed)
+            return real_replace(source,destination)
+        class Response(io.BytesIO):
+            url=native.LLAMA_URL
+        opener=mock.Mock()
+        opener.open.side_effect=lambda *args,**kwargs:Response(data)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(native,'LLAMA_SHA256',hashlib.sha256(data).hexdigest()), mock.patch.object(native.tempfile,'NamedTemporaryFile',side_effect=opened), mock.patch.object(native.os,'replace',side_effect=publish), mock.patch.object(native.urllib.request,'build_opener',return_value=opener):
+            archive=native.source_archive(Path(directory),None)
+            self.assertEqual(archive.read_bytes(),data)
+            self.assertFalse(list(Path(directory).glob('.download-*')))
+
     def test_supplied_source_requires_exact_pin(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'bad.tar.gz';path.write_bytes(b'unverified')

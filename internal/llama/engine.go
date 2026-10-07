@@ -194,6 +194,9 @@ func serverArgs(opts Options) []string {
 		"--n-gpu-layers", strconv.Itoa(opts.GpuLayers),
 		"--parallel", "1",
 		"--jinja", "--reasoning-format", "deepseek",
+		// v0.6 maps llama/GGML INFO to trace verbosity 4. Model buffer and
+		// offload diagnostics are required to verify the actual backend.
+		"--log-verbosity", "4",
 	}
 }
 

@@ -7,6 +7,9 @@ on:
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: native-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 jobs:
   linux:
     strategy:
@@ -19,10 +22,31 @@ jobs:
             target: linux-arm64
     runs-on: ${{ matrix.runner }}
     container:
-      image: almalinux:9@sha256:9819dc675b67b595c2b59e42be7763fca1a8bb217fa5944e04daa22e9a64db16
+      image: almalinux:9.0@sha256:a95a7766fd056b35f72f7b7f7301bcd46e40a6eecd9017e9c41cb4bf22ecb28b
     steps:
-      - name: Install signed baseline build prerequisites
-        run: dnf --enablerepo=crb install -y git gcc gcc-c++ libstdc++-static cmake make python3 binutils tar gzip
+      - name: Install signed, frozen Alma9.0 baseline build prerequisites
+        run: |
+          cat > /etc/yum.repos.d/mini-fabrics-baseline.repo <<'EOF'
+          [fabrics-base]
+          name=Frozen AlmaLinux 9.0 BaseOS
+          baseurl=https://vault.almalinux.org/9.0/BaseOS/$basearch/os/
+          enabled=0
+          gpgcheck=1
+          gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-9
+          [fabrics-app]
+          name=Frozen AlmaLinux 9.0 AppStream
+          baseurl=https://vault.almalinux.org/9.0/AppStream/$basearch/os/
+          enabled=0
+          gpgcheck=1
+          gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-9
+          [fabrics-crb]
+          name=Frozen AlmaLinux 9.0 CRB
+          baseurl=https://vault.almalinux.org/9.0/CRB/$basearch/os/
+          enabled=0
+          gpgcheck=1
+          gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux-9
+          EOF
+          dnf --disablerepo='*' --enablerepo='fabrics-*' install -y git gcc gcc-c++ libstdc++-static cmake make python3 binutils tar gzip
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
@@ -34,7 +58,7 @@ jobs:
           home="$RUNNER_TEMP/mini-fabrics"
           mkdir -p "$home"
           env PATH=/usr/bin:/bin ./clean-installers/mini-fabrics-installer-${{ matrix.target }} --prefix "$home" --backend cpu --model qwen2.5-0.5b --non-interactive
-          python3 tools/smoke.py --runtime "$home/bin/fabrics" --home "$home" --expect-backend cpu --report native-smoke-${{ matrix.target }}.json
+          python3 tools/smoke.py --runtime "$home/bin/fabrics" --home "$home" --expect-backend cpu --log-directory native-logs-${{ matrix.target }} --report native-smoke-${{ matrix.target }}.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-payload-${{ matrix.target }}
@@ -42,6 +66,14 @@ jobs:
             native-payloads/${{ matrix.target }}.*
             native-smoke-${{ matrix.target }}.json
           if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-evidence-${{ matrix.target }}
+          path: |
+            native-smoke-${{ matrix.target }}.json
+            native-logs-${{ matrix.target }}/**
+          if-no-files-found: ignore
   linux-clean:
     needs: linux
     strategy:
@@ -138,7 +170,7 @@ jobs:
           python_path="$(command -v python)"
           home="$RUNNER_TEMP/mini-fabrics"
           env PATH=/usr/bin:/bin ./clean-installers/mini-fabrics-installer-${{ matrix.target }} --prefix "$home" --backend cpu --model qwen2.5-0.5b --non-interactive
-          "$python_path" tools/smoke.py --runtime "$home/bin/fabrics" --home "$home" --expect-backend cpu --report native-smoke-${{ matrix.target }}.json
+          "$python_path" tools/smoke.py --runtime "$home/bin/fabrics" --home "$home" --expect-backend cpu --log-directory native-logs-${{ matrix.target }} --report native-smoke-${{ matrix.target }}.json
       - name: Native Windows compiler-free CPU smoke
         if: runner.os == 'Windows'
         shell: powershell
@@ -148,7 +180,7 @@ jobs:
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
           & ".\clean-installers\mini-fabrics-installer-${{ matrix.target }}.exe" --prefix $homePath --backend cpu --model qwen2.5-0.5b --non-interactive
           if ($LASTEXITCODE -ne 0) { throw 'Native installer failed' }
-          & $python tools/smoke.py --runtime "$homePath\bin\fabrics.exe" --home $homePath --expect-backend cpu --report native-smoke-${{ matrix.target }}.json
+          & $python tools/smoke.py --runtime "$homePath\bin\fabrics.exe" --home $homePath --expect-backend cpu --log-directory native-logs-${{ matrix.target }} --report native-smoke-${{ matrix.target }}.json
           if ($LASTEXITCODE -ne 0) { throw 'Native inference smoke failed' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -157,3 +189,11 @@ jobs:
             native-payloads/${{ matrix.target }}.*
             native-smoke-${{ matrix.target }}.json
           if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-evidence-${{ matrix.target }}
+          path: |
+            native-smoke-${{ matrix.target }}.json
+            native-logs-${{ matrix.target }}/**
+          if-no-files-found: ignore

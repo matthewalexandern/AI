@@ -111,7 +111,7 @@ python3 -m unittest discover -s tools -p 'test_*.py'
 go build -trimpath -o bin/fabrics ./cmd/fabrics
 
 # Native payloads must be built on their actual target host.
-# Linux release builds use Alma/RHEL 9 and require libstdc++-static from CRB.
+# Linux release builds use the frozen signed AlmaLinux 9.0 vault and require libstdc++-static from CRB; rolling Alma9 toolchains can require newer libc symbols.
 python3 tools/native_payload.py --output native-payloads --backends cpu
 python3 tools/package.py --payloads native-payloads --targets linux-amd64 --output dist/linux-only
 ```
