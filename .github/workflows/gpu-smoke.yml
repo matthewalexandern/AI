@@ -1,0 +1,57 @@
+name: Explicit GPU validation (self-hosted hardware)
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        type: choice
+        options: [cuda, vulkan, metal]
+        required: true
+      installer_url:
+        description: Versioned native installer HTTPS URL
+        required: true
+      installer_sha256:
+        description: Trusted published installer SHA256
+        required: true
+permissions:
+  contents: read
+jobs:
+  positive-offload:
+    runs-on: [self-hosted, mini-fabrics-gpu]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Download and verify the requested installer
+        env:
+          INSTALLER_URL: ${{ inputs.installer_url }}
+          INSTALLER_SHA: ${{ inputs.installer_sha256 }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, urllib.request
+          from pathlib import Path
+          url=os.environ['INSTALLER_URL']; expected=os.environ['INSTALLER_SHA'].lower()
+          if not url.startswith('https://') or len(expected)!=64:
+              raise ValueError('Require HTTPS and a trusted SHA256')
+          class SecureRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, target):
+                  if not target.startswith('https://'):
+                      raise ValueError('Refusing insecure installer redirect')
+                  return super().redirect_request(req, fp, code, msg, headers, target)
+          artifact=urllib.request.build_opener(SecureRedirect()).open(url).read()
+          if hashlib.sha256(artifact).hexdigest()!=expected:
+              raise ValueError('Installer SHA256 mismatch')
+          Path('gpu-installer').write_bytes(artifact)
+          Path('gpu-installer').chmod(0o755)
+          PY
+      - name: Require real GPU inference (missing driver or offload fails)
+        env:
+          REQUESTED_BACKEND: ${{ inputs.backend }}
+        shell: bash
+        run: |
+          home="$RUNNER_TEMP/gpu-mini-fabrics"
+          ./gpu-installer --prefix "$home" --backend "$REQUESTED_BACKEND" --model qwen2.5-0.5b --non-interactive
+          python3 tools/smoke.py --runtime "$home/bin/fabrics" --home "$home" --expect-backend "$REQUESTED_BACKEND" --require-gpu --report gpu-evidence.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: positive-gpu-evidence-${{ inputs.backend }}
+          path: gpu-evidence.json
+          if-no-files-found: error
