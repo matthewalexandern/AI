@@ -1,14 +1,26 @@
 import importlib.util
+import io
 import os
 from pathlib import Path
 import signal
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location("smoke", Path(__file__).with_name("smoke.py"))
 smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
+
+
+class DiagnosticEncodingTests(unittest.TestCase):
+    def test_legacy_windows_console_does_not_hide_unicode_failure_details(self):
+        encoded = io.BytesIO()
+        console = io.TextIOWrapper(encoded, encoding="cp1252", write_through=True)
+        with mock.patch.object(smoke.sys, "stdout", console):
+            smoke.print_diagnostic("Model path: C:\\Users\\名字\\café.gguf")
+        self.assertEqual(encoded.getvalue().decode("cp1252"), "Model path: C:\\Users\\\\u540d\\u5b57\\café.gguf\n")
+        console.detach()
 
 
 class ModelResultTests(unittest.TestCase):

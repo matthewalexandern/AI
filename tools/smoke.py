@@ -10,6 +10,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -28,6 +29,14 @@ def request(base, path, payload=None, timeout=300):
 
 MODES = ("adaptive", "fast", "balanced", "deep")
 BACKENDS = ("cpu", "cuda", "metal", "vulkan")
+
+
+def print_diagnostic(message):
+    # Windows terminals can still use a legacy code page while model/log/config
+    # data is UTF-8. Preserve diagnostics as escapes instead of masking the
+    # original failure with a console UnicodeEncodeError.
+    encoding = sys.stdout.encoding or "utf-8"
+    print(message.encode(encoding, errors="backslashreplace").decode(encoding), flush=True)
 
 
 def check_result(result, expected_mode=None):
@@ -197,7 +206,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
     if not math.isfinite(startup_timeout) or not 10 <= startup_timeout <= 900:
         raise ValueError("Startup timeout must be between 10 and 900 seconds")
     runtime = Path(runtime).resolve()
-    configuration = json.loads((Path(home) / "config.json").read_text())
+    configuration = json.loads((Path(home) / "config.json").read_text(encoding="utf-8"))
     if not configuration.get("model_path"):
         raise ValueError("Install a GGUF model before running the real-model smoke check")
     configured_backend = configuration.get("backend", "cpu")
@@ -217,7 +226,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
         finally:
             first.close(); second.close()
         configuration["port"] = engine_port
-        (isolated / "config.json").write_text(json.dumps(configuration))
+        (isolated / "config.json").write_text(json.dumps(configuration), encoding="utf-8")
         base = f"http://127.0.0.1:{api_port}"
         process_options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
         log_path = isolated / "runtime.log"
@@ -247,7 +256,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
                 log.flush()
                 # Capture load evidence before inference can add generated text
                 # to any diagnostics. Backend discovery alone is insufficient.
-                evidence = backend_evidence(configuration, log_path.read_text(errors="replace"), expected_backend, require_gpu)
+                evidence = backend_evidence(configuration, log_path.read_text(encoding="utf-8", errors="replace"), expected_backend, require_gpu)
                 evidence["readiness_seconds"] = round(time.monotonic() - startup_begin, 3)
 
                 arithmetic = request(base, "/v1/chat", {"session": "arithmetic", "input": "What is 2 + 2? Give one short sentence."})
@@ -271,9 +280,9 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
                     raise AssertionError("Persisted cognition decision differs from the returned decision")
             except Exception:
                 log.flush()
-                print(log_path.read_text(errors="replace")[-6000:], flush=True)
+                print_diagnostic(log_path.read_text(encoding="utf-8", errors="replace")[-6000:])
                 if log_directory is not None:
-                    print(f"Preserved runtime log: {log_path}", flush=True)
+                    print_diagnostic(f"Preserved runtime log: {log_path}")
                 raise
             finally:
                 stop(process)
@@ -287,7 +296,7 @@ def smoke(runtime, home, mode="balanced", log_directory=None, expected_backend=N
             shutdown = "parent exited and inference listeners closed; surviving Windows descendants not independently enumerated"
         if reachable(api_port) or reachable(engine_port):
             raise AssertionError("An owned API or inference listener survived runtime shutdown")
-        reopened = subprocess.run([str(runtime), "--home", str(isolated), "episodes", "--session", "recall"], capture_output=True, text=True, check=True, timeout=30)
+        reopened = subprocess.run([str(runtime), "--home", str(isolated), "episodes", "--session", "recall"], capture_output=True, text=True, encoding="utf-8", check=True, timeout=30)
         if json.loads(reopened.stdout) != episodes:
             raise AssertionError("Persisted turn changed after reopening the database")
         return {"status": "passed_with_model_warnings" if model_quality_warnings else "passed", "runtime_checks": "passed", "model_quality_warnings": model_quality_warnings,
@@ -311,7 +320,7 @@ def main():
     encoded = json.dumps(result, indent=2) + "\n"
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(encoded)
+        args.report.write_text(encoded, encoding="utf-8")
     print(encoded)
 
 

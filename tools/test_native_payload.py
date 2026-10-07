@@ -26,8 +26,19 @@ class NativePayloadTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Unresolved'):
                 native.linux_dependencies(Path('/tmp/server'))
     def test_glibc_requirements_are_numeric(self):
-        with mock.patch.object(native,'capture',return_value='GLIBC_2.9 GLIBC_2.34 GLIBC_PRIVATE'):
+        output = '0000 DF *UND* (GLIBC_2.9) old_symbol\n0000 DF *UND* (GLIBC_2.34) new_symbol\n0000 g DF .text GLIBC_2.35 exported_symbol\n0000 DF *UND* (GLIBC_PRIVATE) internal_symbol\n'
+        with mock.patch.object(native,'capture',return_value=output):
             self.assertEqual(native.glibc_requirement([Path('server')]),'2.34')
+    def test_failed_build_workspace_can_be_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, 'build failure'):
+                with native.build_workspace(Path(directory), keep=True) as stage:
+                    (stage / 'diagnostic').write_bytes(b'ELF')
+                    raise ValueError('build failure')
+            self.assertEqual((stage / 'diagnostic').read_bytes(), b'ELF')
+            with native.build_workspace(Path(directory)) as cleaned:
+                (cleaned / 'temporary').touch()
+            self.assertFalse(cleaned.exists())
     def test_source_archive_rejects_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'source.tar.gz'

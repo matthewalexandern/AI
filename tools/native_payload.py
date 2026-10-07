@@ -19,6 +19,7 @@ import tempfile
 import urllib.request
 import gzip
 import importlib.util
+from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.1.0"
@@ -198,8 +199,25 @@ def glibc_requirement(files):
     versions = set()
     for file in files:
         text = capture(["objdump", "-T", file])
-        versions.update(re.findall(r"GLIBC_([0-9]+(?:\.[0-9]+)+)", text))
+        # Versioned definitions in a bundled library are not loader requirements.
+        # Only undefined imports require a symbol supplied by the host's glibc.
+        for line in text.splitlines():
+            if "*UND*" in line:
+                versions.update(re.findall(r"GLIBC_([0-9]+(?:\.[0-9]+)+)", line))
     return max(versions, key=lambda v: tuple(map(int, v.split(".")))) if versions else None
+
+
+@contextmanager
+def build_workspace(parent, keep=False):
+    stage = Path(tempfile.mkdtemp(prefix=".native-", dir=parent))
+    print("Native build workspace:", stage, flush=True)
+    try:
+        yield stage
+    finally:
+        if keep:
+            print("Preserved native build workspace:", stage, flush=True)
+        else:
+            shutil.rmtree(stage)
 
 
 def deterministic_archive(directory):
@@ -277,8 +295,7 @@ def build(args):
         raise ValueError("Release native builds require the pinned Go 1.27.1 toolchain")
     args.output.mkdir(parents=True, exist_ok=True)
     archive = source_archive(args.cache, args.llama_archive)
-    with tempfile.TemporaryDirectory(prefix=".native-", dir=args.output.parent) as temporary:
-        stage = Path(temporary)
+    with build_workspace(args.output.parent, getattr(args, "keep_build", False)) as stage:
         source, payload = stage / "llama", stage / "native"
         extract_source(archive, source)
         (payload / "bin").mkdir(parents=True)
@@ -373,6 +390,7 @@ def main():
     parser.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1))
     parser.add_argument("--max-glibc", default="2.34", help="Linux release baseline; do not raise for RHEL9-compatible releases")
     parser.add_argument("--dependency-license", action="append", type=Path, default=[])
+    parser.add_argument("--keep-build", action="store_true", help="preserve build workspace, including failed binaries, for diagnostics")
     args = parser.parse_args()
     if not 1 <= args.jobs <= 64:
         parser.error("--jobs must be 1..64")
