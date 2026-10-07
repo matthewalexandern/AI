@@ -10,4 +10,4 @@ Release assembly is gated on actual native CPU installation and inference checks
 
 This release candidate does not establish Metal/CUDA/Vulkan hardware compatibility or successful Windows-desktop/Hyper-V VM execution. Those host checks remain pending. ROCm is not implemented. See docs/native-testing.md for the Windows PowerShell and Hyper-V harnesses and docs/verification.md for the observed test record.
 
-Choose the matching installer for your operating system and architecture, then verify its SHA256 against SHA256SUMS. Native build/source provenance accompanies the assets.
+Choose the matching installer for your operating system and architecture, then verify its SHA256 against SHA256SUMS. Native build/source provenance accompanies the assets. GitHub build attestations cover the installers and provenance files. Apple notarization and Windows Authenticode signing are not configured; desktop download and operating-system approval behavior still require native user testing before a stable release.

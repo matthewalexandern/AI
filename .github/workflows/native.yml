@@ -1,7 +1,17 @@
 name: Native payloads and clean installation
 on:
   workflow_call:
+    inputs:
+      reuse_run_id:
+        description: Successful native workflow run whose verified payloads should be reused
+        type: string
+        default: ''
   workflow_dispatch:
+    inputs:
+      reuse_run_id:
+        description: Successful native workflow run whose verified payloads should be reused
+        type: string
+        default: ''
   push:
     branches: [mini-fabrics-v0.1.0]
     paths-ignore: ["docs/**", "README.md"]
@@ -9,11 +19,82 @@ on:
     paths-ignore: ["docs/**", "README.md"]
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: native-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 jobs:
+  reuse:
+    if: inputs.reuse_run_id != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Verify and retrieve all original native payloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REUSE_RUN_ID: ${{ inputs.reuse_run_id }}
+        run: python3 tools/verify_native_reuse.py --repository "$GITHUB_REPOSITORY" --run-id "$REUSE_RUN_ID" --output reuse-output --report native-reuse-report.json
+      - name: Retain verified linux-amd64 payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-payload-linux-amd64
+          path: |
+            reuse-output/native-payload-linux-amd64/native-payloads/linux-amd64.*
+            reuse-output/native-payload-linux-amd64/native-smoke-linux-amd64.json
+          if-no-files-found: error
+      - name: Retain verified linux-arm64 payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-payload-linux-arm64
+          path: |
+            reuse-output/native-payload-linux-arm64/native-payloads/linux-arm64.*
+            reuse-output/native-payload-linux-arm64/native-smoke-linux-arm64.json
+          if-no-files-found: error
+      - name: Retain verified darwin-amd64 payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-payload-darwin-amd64
+          path: |
+            reuse-output/native-payload-darwin-amd64/native-payloads/darwin-amd64.*
+            reuse-output/native-payload-darwin-amd64/native-smoke-darwin-amd64.json
+          if-no-files-found: error
+      - name: Retain verified darwin-arm64 payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-payload-darwin-arm64
+          path: |
+            reuse-output/native-payload-darwin-arm64/native-payloads/darwin-arm64.*
+            reuse-output/native-payload-darwin-arm64/native-smoke-darwin-arm64.json
+          if-no-files-found: error
+      - name: Retain verified windows-amd64 payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-payload-windows-amd64
+          path: |
+            reuse-output/native-payload-windows-amd64/native-payloads/windows-amd64.*
+            reuse-output/native-payload-windows-amd64/native-smoke-windows-amd64.json
+          if-no-files-found: error
+      - name: Retain verified windows-arm64 payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-payload-windows-arm64
+          path: |
+            reuse-output/native-payload-windows-arm64/native-payloads/windows-arm64.*
+            reuse-output/native-payload-windows-arm64/native-smoke-windows-arm64.json
+          if-no-files-found: error
+      - name: Retain original native-run verification report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-reuse-report
+          path: native-reuse-report.json
+          if-no-files-found: error
   linux:
+    if: inputs.reuse_run_id == ''
     strategy:
       fail-fast: false
       matrix:
@@ -77,7 +158,8 @@ jobs:
             native-logs-${{ matrix.target }}/**
           if-no-files-found: ignore
   linux-clean:
-    needs: linux
+    needs: [linux, reuse]
+    if: always() && ((needs.linux.result == 'success' && needs.reuse.result == 'skipped') || (needs.linux.result == 'skipped' && needs.reuse.result == 'success'))
     strategy:
       fail-fast: false
       matrix:
@@ -95,7 +177,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: native-payload-${{ matrix.target }}
-          path: native-payloads
+          path: .
       - run: python3 tools/package.py --targets ${{ matrix.target }} --payloads native-payloads --output clean-installers
       - name: Clean Ubuntu22.04 and RHEL9 images contain no Go, CMake or compiler
         env:
@@ -114,9 +196,12 @@ jobs:
             docker run --rm -e NATIVE_TARGET -e PREREQUISITES="$prerequisites" -v "$PWD:/work:ro" -v "$RUNNER_TEMP/clean-$distro:/home" -w /work "$image" bash -lc '
               set -eu
               eval "$PREREQUISITES"
-              ! command -v go
-              ! command -v cmake
-              ! command -v c++
+              for tool in go cmake c++; do
+                if command -v "$tool" >/dev/null 2>&1; then
+                  echo "Clean installation image unexpectedly contains $tool" >&2
+                  exit 1
+                fi
+              done
               /work/clean-installers/mini-fabrics-installer-$NATIVE_TARGET --prefix /home/mini-fabrics --backend cpu --model qwen2.5-1.5b --non-interactive
               python3 tools/smoke.py --runtime /home/mini-fabrics/bin/fabrics --home /home/mini-fabrics --expect-backend cpu --report /home/evidence.json
             '
@@ -127,6 +212,7 @@ jobs:
           path: ${{ runner.temp }}/clean-*/evidence.json
           if-no-files-found: error
   desktop:
+    if: inputs.reuse_run_id == ''
     strategy:
       fail-fast: false
       matrix:

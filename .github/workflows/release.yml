@@ -1,21 +1,33 @@
 name: Versioned native release
 on:
   workflow_dispatch:
+    inputs:
+      reuse_run_id:
+        description: Successful native workflow run whose verified payloads should be reused
+        type: string
+        default: ''
   push:
     tags: ['v0.1.0', 'v0.1.0-rc.*']
 permissions:
   contents: read
+  actions: read
 jobs:
   validate:
     uses: ./.github/workflows/ci.yml
   native:
     needs: validate
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/native.yml
+    with:
+      reuse_run_id: ${{ inputs.reuse_run_id || '' }}
   assemble:
     needs: [validate, native]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
       id-token: write
       attestations: write
     steps:
@@ -26,10 +38,39 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: native-payload-*
-          path: native-payloads
+          path: .
           merge-multiple: true
       - name: Assemble all six verified native payloads
         run: python3 tools/package.py --payloads native-payloads --output release/v0.1.0
+      - name: Preserve all six original native manifests in the release
+        shell: python3 {0}
+        run: |
+          import hashlib, shutil
+          from pathlib import Path
+          targets = ('linux-amd64', 'linux-arm64', 'darwin-amd64', 'darwin-arm64', 'windows-amd64', 'windows-arm64')
+          source, destination = Path('native-payloads'), Path('release/v0.1.0')
+          manifests = list(source.glob('*.json'))
+          expected = {target + '.json' for target in targets}
+          if len(manifests) != len(targets) or {path.name for path in manifests} != expected:
+              raise ValueError('Release requires exactly the six expected native manifests')
+          with (destination / 'SHA256SUMS').open('a', encoding='utf-8') as checksums:
+              for target in targets:
+                  original = source / (target + '.json')
+                  published = destination / ('mini-fabrics-native-' + target + '.json')
+                  if original.is_symlink() or not original.is_file() or published.exists():
+                      raise ValueError('Native manifests must be regular files with fresh release destinations')
+                  shutil.copyfile(original, published)
+                  checksums.write(hashlib.sha256(published.read_bytes()).hexdigest() + '  ' + published.name + '\n')
+      - name: Retain original native-run provenance in the release
+        if: inputs.reuse_run_id != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: native-reuse-report
+          path: release/v0.1.0
+      - name: Include native-run provenance in release checksums
+        if: inputs.reuse_run_id != ''
+        working-directory: release/v0.1.0
+        run: sha256sum native-reuse-report.json >> SHA256SUMS
       - name: Verify published bytes
         run: cd release/v0.1.0 && sha256sum --check SHA256SUMS
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
