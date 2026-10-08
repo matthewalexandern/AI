@@ -1,0 +1,273 @@
+name: Build and verify GPU release candidate (self-hosted)
+on:
+  workflow_dispatch:
+    inputs:
+      host_os:
+        description: Actual GPU runner operating system
+        type: choice
+        options: [Windows, Linux, macOS]
+        required: true
+      host_arch:
+        description: Actual GPU runner architecture (no cross-builds)
+        type: choice
+        options: [X64, ARM64]
+        required: true
+      backend:
+        description: GPU backend to bundle alongside CPU and positively test
+        type: choice
+        options: [cuda, vulkan, metal]
+        required: true
+      model:
+        description: Pinned catalog model used for CPU and GPU smoke
+        type: choice
+        options: [qwen2.5-0.5b, qwen2.5-1.5b, qwen2.5-3b, gpt-oss-20b]
+        default: qwen2.5-0.5b
+        required: true
+      jobs:
+        description: Maximum parallel native compiler jobs (1 to 16)
+        default: '2'
+        required: true
+
+# This workflow only produces reviewed candidates. It cannot publish a release.
+permissions:
+  contents: read
+
+jobs:
+  validate-request:
+    runs-on: ubuntu-24.04
+    outputs:
+      target: ${{ steps.request.outputs.target }}
+    steps:
+      - name: Reject unsupported host/backend combinations before scheduling hardware
+        id: request
+        env:
+          REQUESTED_OS: ${{ inputs.host_os }}
+          REQUESTED_ARCH: ${{ inputs.host_arch }}
+          REQUESTED_BACKEND: ${{ inputs.backend }}
+          BUILD_JOBS: ${{ inputs.jobs }}
+        shell: python3 {0}
+        run: |
+          import os
+          systems = {'Windows': 'windows', 'Linux': 'linux', 'macOS': 'darwin'}
+          arches = {'X64': 'amd64', 'ARM64': 'arm64'}
+          system, arch, backend = (os.environ[key] for key in ('REQUESTED_OS', 'REQUESTED_ARCH', 'REQUESTED_BACKEND'))
+          if system not in systems or arch not in arches or backend not in ('cuda', 'vulkan', 'metal'):
+              raise ValueError('Unsupported native GPU target')
+          if (backend == 'metal') != (system == 'macOS'):
+              raise ValueError('macOS uses Metal; CUDA/Vulkan candidates require Linux or Windows')
+          if backend == 'cuda' and system == 'Windows' and arch != 'X64':
+              raise ValueError('Windows CUDA candidates require x64 and a supported native CUDA toolkit')
+          if not os.environ['BUILD_JOBS'].isdigit() or not 1 <= int(os.environ['BUILD_JOBS']) <= 16:
+              raise ValueError('jobs must be an integer from 1 to 16')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'target={systems[system]}-{arches[arch]}\n')
+
+  native-gpu:
+    needs: validate-request
+    # Register trusted, physical GPU hosts with this backend-specific label.
+    # Hyper-V CPU guests are not GPU test hosts for this workflow.
+    runs-on:
+      - self-hosted
+      - ${{ inputs.host_os }}
+      - ${{ inputs.host_arch }}
+      - mini-fabrics-gpu-${{ inputs.backend }}
+    timeout-minutes: 120
+    env:
+      REQUESTED_OS: ${{ inputs.host_os }}
+      REQUESTED_ARCH: ${{ inputs.host_arch }}
+      REQUESTED_BACKEND: ${{ inputs.backend }}
+      EXPECTED_TARGET: ${{ needs.validate-request.outputs.target }}
+      SELECTED_MODEL: ${{ inputs.model }}
+      BUILD_JOBS: ${{ inputs.jobs }}
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.27.1'
+      # setup-python's hosted Linux builds are not an Alma/RHEL compatibility
+      # promise. The Linux baseline host supplies its own Python 3.9+.
+      - if: runner.os != 'Linux'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+          architecture: ${{ inputs.host_arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Expose the Linux host Python without changing system files
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_path="$(command -v python3)"
+          "$python_path" -c 'import sys; sys.exit(sys.version_info < (3, 9))'
+          alias_directory="$(mktemp -d "$RUNNER_TEMP/mini-fabrics-python.XXXXXX")"
+          ln -s "$python_path" "$alias_directory/python"
+          printf '%s\n' "$alias_directory" >> "$GITHUB_PATH"
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+        with:
+          arch: ${{ inputs.host_arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Allocate fresh installation and evidence directories
+        id: prepare
+        shell: python {0}
+        run: |
+          import os, tempfile
+          from pathlib import Path
+          directory = Path(tempfile.mkdtemp(prefix='mini-fabrics-gpu-', dir=os.environ['RUNNER_TEMP']))
+          (directory / 'evidence').mkdir()
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'GPU_RUN_ROOT={directory}\n')
+          print(f'Fresh build/test directory: {directory}')
+      - name: Build verified native CPU and GPU payloads, package, and test actual offload
+        shell: python {0}
+        run: |
+          import hashlib, json, os, platform, shutil, subprocess, sys
+          from pathlib import Path
+
+          root = Path(os.environ['GPU_RUN_ROOT'])
+          evidence, candidate, payloads = root / 'evidence', root / 'candidate', root / 'payloads'
+          backend, target = os.environ['REQUESTED_BACKEND'], os.environ['EXPECTED_TARGET']
+          suffix = '.exe' if os.name == 'nt' else ''
+          state = {'status': 'failed', 'stage': 'prerequisites', 'target': target, 'backend': backend,
+                   'model': os.environ['SELECTED_MODEL'], 'commit': os.environ['GITHUB_SHA'],
+                   'workflow_run_id': os.environ['GITHUB_RUN_ID'], 'workflow_run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                   'host_os': platform.system(), 'host_arch': platform.machine(), 'published': False}
+
+          def digest(path):
+              result = hashlib.sha256()
+              with Path(path).open('rb') as stream:
+                  for block in iter(lambda: stream.read(1024 * 1024), b''):
+                      result.update(block)
+              return result.hexdigest()
+
+          def run(command, name, environment=None):
+              print('Running:', ' '.join(str(part) for part in command), flush=True)
+              with (evidence / (name + '.log')).open('w', encoding='utf-8') as log:
+                  process = subprocess.Popen([str(part) for part in command], stdout=subprocess.PIPE,
+                                             stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', env=environment)
+                  for line in process.stdout:
+                      log.write(line)
+                      log.flush()
+                      print(line, end='', flush=True)
+                  code = process.wait()
+              if code:
+                  raise RuntimeError(f'{name} failed with exit code {code}; inspect its retained log')
+
+          try:
+              if sys.version_info < (3, 9):
+                  raise ValueError('The native GPU build/test host requires Python 3.9 or newer')
+              systems = {'Windows': 'windows', 'Linux': 'linux', 'Darwin': 'darwin'}
+              arches = {'AMD64': 'amd64', 'x86_64': 'amd64', 'ARM64': 'arm64', 'aarch64': 'arm64', 'arm64': 'arm64'}
+              actual = systems.get(platform.system(), 'unknown') + '-' + arches.get(platform.machine(), 'unknown')
+              if actual != target:
+                  raise ValueError(f'Runner architecture mismatch: requested {target}, actual {actual}')
+              if platform.system() == 'Linux':
+                  libc, version = platform.libc_ver()
+                  if libc != 'glibc' or tuple(map(int, version.split('.'))) > (2, 34):
+                      raise ValueError('Use an Alma/RHEL 9 GPU build host (glibc 2.34 baseline); do not raise --max-glibc')
+              license_paths = json.loads(os.environ.get('MINI_FABRICS_GPU_LICENSES', '[]'))
+              if not isinstance(license_paths, list) or not all(isinstance(path, str) for path in license_paths):
+                  raise ValueError('Host MINI_FABRICS_GPU_LICENSES must be a JSON array of authoritative license file paths')
+              licenses = []
+              for value in license_paths:
+                  path = Path(value)
+                  if not path.is_absolute() or not path.is_file():
+                      raise ValueError('Every dependency license must name an existing absolute file on the trusted build host')
+                  licenses.append(path.resolve())
+              if backend in ('cuda', 'vulkan') and not licenses:
+                  raise ValueError('Configure MINI_FABRICS_GPU_LICENSES with all required vendor/loader redistribution license texts before building')
+              state['dependency_licenses'] = [{'name': path.name, 'sha256': digest(path)} for path in licenses]
+              for tool in ('go', 'cmake', 'git'):
+                  if not shutil.which(tool):
+                      raise ValueError(f'Missing build prerequisite: {tool}')
+              run(['go', 'version'], 'go-version')
+              run(['cmake', '--version'], 'cmake-version')
+              if backend == 'cuda':
+                  run(['nvcc', '--version'], 'cuda-toolkit')
+                  run(['nvidia-smi', '--query-gpu=name,driver_version', '--format=csv,noheader'], 'nvidia-driver')
+              elif backend == 'vulkan':
+                  run(['glslc', '--version'], 'vulkan-compiler')
+                  if shutil.which('vulkaninfo'):
+                      run(['vulkaninfo', '--summary'], 'vulkan-driver')
+              else:
+                  run(['bash', 'native/macos/test.sh', '--report', evidence / 'swift-resources.json'], 'swift-resources')
+              state['stage'] = 'unit-tests'
+              run(['go', 'test', './...'], 'go-tests')
+              run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tools', '-p', 'test_*.py'], 'python-tests')
+              state['stage'] = 'native-build'
+              command = [sys.executable, 'tools/native_payload.py', '--target', target, '--backends', 'cpu,' + backend,
+                         '--jobs', os.environ['BUILD_JOBS'], '--output', payloads, '--cache', root / 'source-cache']
+              for path in licenses:
+                  command += ['--dependency-license', path]
+              run(command, 'native-build')
+              state['stage'] = 'package'
+              run([sys.executable, 'tools/package.py', '--targets', target, '--payloads', payloads, '--output', candidate], 'package')
+              for line in (candidate / 'SHA256SUMS').read_text(encoding='utf-8').splitlines():
+                  expected, name = line.split('  ', 1)
+                  if Path(name).name != name or digest(candidate / name) != expected:
+                      raise ValueError('Packaged release checksum verification failed')
+              original = candidate / ('mini-fabrics-installer-' + target + suffix)
+              installer = candidate / ('mini-fabrics-installer-' + target + '-' + backend + suffix)
+              original.rename(installer)
+              state['installer_filename'] = installer.name
+              state['original_installer_filename'] = original.name
+              shutil.copy2(payloads / (target + '.json'), candidate / 'native-manifest.json')
+
+              # Runtime tests inherit only normal OS executable search paths, not
+              # development SDKs or application-library search-path overrides.
+              runtime_environment = dict(os.environ)
+              for name in ('CUDA_PATH', 'CUDA_HOME', 'VULKAN_SDK', 'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH'):
+                  runtime_environment.pop(name, None)
+              if os.name == 'nt':
+                  windows = Path(os.environ['SystemRoot'])
+                  runtime_environment['PATH'] = os.pathsep.join(str(path) for path in
+                      (windows / 'System32', windows, windows / 'System32/WindowsPowerShell/v1.0'))
+              else:
+                  runtime_environment['PATH'] = '/usr/bin:/bin'
+              for selected in ('cpu', backend):
+                  state['stage'] = selected + '-installation'
+                  prefix = root / ('installation-' + selected)
+                  run([installer, '--prefix', prefix, '--backend', selected, '--model', os.environ['SELECTED_MODEL'],
+                       '--non-interactive'], selected + '-install', runtime_environment)
+                  runtime = prefix / 'bin' / ('fabrics' + suffix)
+                  run([runtime, '--home', prefix, 'doctor'], selected + '-doctor', runtime_environment)
+                  state['stage'] = selected + '-smoke'
+                  command = [sys.executable, 'tools/smoke.py', '--runtime', runtime, '--home', prefix, '--mode', 'balanced',
+                             '--expect-backend', selected, '--log-directory', evidence / (selected + '-runtime-logs'),
+                             '--report', evidence / (selected + '-smoke.json')]
+                  if selected != 'cpu':
+                      command.append('--require-gpu')
+                  run(command, selected + '-smoke', runtime_environment)
+              gpu_report = json.loads((evidence / (backend + '-smoke.json')).read_text(encoding='utf-8'))
+              offload = gpu_report['backend_evidence']
+              if not offload['offload_confirmed'] or offload['offloaded_layers'] <= 0 or offload['configured_backend'] != backend:
+                  raise ValueError('A release candidate requires positive offload on the requested GPU backend')
+              state.update(status='passed', stage='complete', installer_sha256=digest(installer),
+                           hardware_tested=gpu_report['hardware_tested'], backend_evidence=offload)
+              (candidate / 'gpu-validation.json').write_text(json.dumps(state, indent=2) + '\n', encoding='utf-8')
+              checksums = ''.join(digest(path) + '  ' + path.name + '\n' for path in sorted(candidate.iterdir()) if path.name != 'SHA256SUMS')
+              (candidate / 'SHA256SUMS').write_text(checksums, encoding='utf-8')
+              print('Verified GPU candidate is ready for manual review; no release was published.')
+          except Exception as error:
+              state['status'] = 'failed'
+              state['failure'] = str(error)
+              raise
+          finally:
+              (evidence / 'workflow-report.json').write_text(json.dumps(state, indent=2) + '\n', encoding='utf-8')
+      - name: Retain build, install, CPU, and GPU evidence even on failure
+        if: always() && steps.prepare.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gpu-evidence-${{ needs.validate-request.outputs.target }}-${{ inputs.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.GPU_RUN_ROOT }}/evidence/
+          if-no-files-found: error
+      - name: Upload only a successfully tested complete GPU candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gpu-candidate-${{ needs.validate-request.outputs.target }}-${{ inputs.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.GPU_RUN_ROOT }}/candidate/
+          if-no-files-found: error

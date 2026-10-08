@@ -1,0 +1,11 @@
+/bin/
+/dist/
+/.cache/
+*.db
+*.db-shm
+*.db-wal
+*.gguf
+__pycache__/
+/native-payloads/
+/.native-cache/
+/test-evidence/
