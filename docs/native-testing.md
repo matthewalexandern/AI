@@ -17,8 +17,9 @@ The Hyper-V guests below are CPU test environments. Their success does not
 establish CUDA, Vulkan, GPU passthrough, GPU partitioning, or macOS compatibility.
 No desktop was accessed and no Windows feature was enabled by creating these
 scripts in the Linux cloud workspace. Platform-specific runs remain necessary.
-The Linux amd64 release requires an **x86-64-v2** CPU because of its AlmaLinux 9
-static C++ runtime libraries. A Hyper-V guest must expose those CPU features;
+The Linux amd64 release requires **glibc 2.34 or later** and an **x86-64-v2** CPU
+because of its AlmaLinux 9 static C++ runtime libraries. Use Ubuntu 22.04 or
+later, or RHEL 9 or later. A Hyper-V guest must expose those CPU features;
 virtualization does not lower the installer's instruction-set requirement.
 
 For the Windows desktop, run the PowerShell commands below locally, or connect
@@ -64,6 +65,106 @@ platforms and additionally includes Metal in macOS packages. It does **not**
 bundle CUDA or Vulkan in the Windows/Linux release installers. Build and validate
 those GPU variants using the separate manual workflow described below; merely
 passing `--backend cuda` to a CPU-only package cannot add CUDA support.
+
+## Run one local admin session
+
+`tools/hyperv/Invoke-NativeMatrix.ps1` runs a closed JSON plan for Windows CPU
+verification, optional Hyper-V enablement/VM creation, and Ubuntu/RHEL guest CPU
+tests. Launch it from ordinary Windows PowerShell: it validates and prints the
+plan, then requests **one UAC approval for the process session**. Every approved
+Hyper-V step runs in that elevated session. Starting from an Administrator
+terminal requires no additional elevation. The launcher pins the plan, scripts,
+installers, and ISO checksums and stops when inputs change.
+
+Download the [v0.1.0-rc.4 release](https://github.com/matthewalexandern/AI/releases/tag/v0.1.0-rc.4)
+assets `mini-fabrics-installer-windows-amd64.exe` and
+`mini-fabrics-installer-linux-amd64` into `C:\MiniFabrics\release` (or adjust the
+plan paths). The example pins their verified RC4 SHA256 values. For another
+release or architecture, replace both the filenames and trusted checksums.
+
+Copy the example and edit the local paths, VM names,
+guest addresses, ordinary SSH usernames, and verified known-hosts/private-key
+file paths. Do not put passwords or key contents in the JSON. Relative paths are
+resolved from the plan's directory. The example targets x64 Windows and existing
+Ubuntu/RHEL guests; ARM hosts need matching installers, media, and architecture.
+
+```powershell
+Copy-Item .\tools\hyperv\native-matrix.example.json .\matrix.local.json
+# Edit matrix.local.json for your desktop before either invocation.
+.\tools\hyperv\Invoke-NativeMatrix.ps1 -PlanPath .\matrix.local.json -ValidateOnly
+.\tools\hyperv\Invoke-NativeMatrix.ps1 -PlanPath .\matrix.local.json
+```
+
+Validation checks the closed plan schema, files, and SHA256 values without UAC
+or host changes. Running requires Python 3.9+ for Windows evidence and OpenSSH
+for guests. Guest OS installation, Python, verified host fingerprints, and
+key-based login must already be prepared as described below. `provision` entries
+create verified-ISO VMs; creation alone is reported as `prepared`, not a passed
+Linux test. Creation does not install the guest OS unattended.
+
+If the guests do not exist yet, save a provisioning-only plan such as this as
+`provision.local.json`. Replace the ISO path and publisher SHA256 before
+validation. Add a second entry with a different name and verified RHEL media to
+prepare RHEL too; the launcher accepts at most two guests per plan.
+
+```json
+{
+  "schema_version": 1,
+  "enable_hyperv": true,
+  "report_root": "C:\\MiniFabrics\\test-evidence\\provision-01",
+  "windows": null,
+  "guests": [],
+  "provision": [{
+    "distribution": "Ubuntu",
+    "iso_path": "C:\\ISOs\\ubuntu-server-amd64.iso",
+    "iso_sha256": "REPLACE_WITH_VERIFIED_PUBLISHER_SHA256",
+    "name": "MiniFabrics-Ubuntu",
+    "vm_root": "D:\\MiniFabricsVMs",
+    "switch_name": "Default Switch",
+    "memory_bytes": 25769803776,
+    "processors": 4,
+    "disk_bytes": 68719476736,
+    "start": true
+  }]
+}
+```
+
+Run that plan, install the guest OS/Python/SSH interactively, then run the test
+plan with a fresh `report_root`. To use one UAC approval across both phases,
+open **Windows PowerShell as Administrator once** and keep that window open
+while preparing the guests. Invoke both plans there; the launcher reuses the
+existing admin token. Launching each phase from a new ordinary terminal can
+request a separate approval. A required host reboot still ends the session.
+
+The default test model is your preferred GPT-OSS 20B with a 1,800-second deadline
+per turn. A fixed 6 GiB guest cannot fit it; allocate sufficient RAM/disk (for
+example, 24 GiB guest RAM plus host headroom) or explicitly choose the small
+`qwen2.5-1.5b` validation fixture. Guest tests run sequentially and preserve
+existing VM power states. Two running 24 GiB guests still consume memory
+simultaneously; size the host or run separate plans with only the intended VM
+running. A named test VM must already be a running Generation 2 VM before its
+test begins. Hyper-V integration services must report its IPv4 address through
+`Get-VMNetworkAdapter`; empty IP results block testing. Prepare the guest's
+Hyper-V integration/KVP daemon if needed.
+
+On a smaller host, use a Windows-only plan (`guests: []`) before starting the
+large guests, then guest-only plans (`windows: null`) with one VM running at a
+time. Keep the same Administrator window open to reuse its approval; start or
+stop your own VMs deliberately between plans.
+
+If enabling Hyper-V requires a restart, the report says `blocked_reboot` and
+stops without rebooting Windows. An elevated process cannot survive that
+restart; a later launch can require another UAC approval. There is no permanent
+administrator service or scheduled task. OS install/SSH readiness failures are
+reported as blocked or failed and do not become successful platform tests.
+
+`matrix-report.json` records the host OS/CPU, source/input checksums, stages,
+completed targets, and failures under the new `report_root`. Existing evidence,
+VMs, and disks are preserved. A Hyper-V guest counts as passed only when its SSH
+destination matches the named VM's reported IPv4 address and retrieved evidence
+matches the requested distribution and architecture. An AlmaLinux result does
+not count as actual RHEL. Hyper-V does not establish macOS, physical GPU, or a
+different native CPU architecture's compatibility.
 
 The harness also has small protocol checks that do not change Hyper-V state:
 
@@ -128,6 +229,10 @@ A virtual macOS CI runner can compile and test Swift even when Metal is absent;
 it cannot satisfy the Metal GPU gate without a real supported device.
 
 ## Prepare a Windows Hyper-V host
+
+The direct commands in this section and the following VM-creation section are
+the manual alternative to the matrix launcher. When using a plan, let that
+launcher perform these steps in its existing elevated session.
 
 Use Windows Pro, Enterprise, or Education with hardware virtualization and SLAT
 enabled in UEFI/BIOS. Use guest ISOs and installers matching the host's supported
@@ -217,7 +322,14 @@ The runner checks that hash locally and again after transferring to the guest:
 ```
 
 Repeat with the RHEL guest address and a new report directory. Use `-Port` and
-`-IdentityFile` when needed. The script accepts a DNS name or IPv4 address; IPv6
+`-IdentityFile` and `-KnownHostsFile` when needed. To record a named Hyper-V test,
+also supply `-VMName`, `-ExpectedDistribution Ubuntu|RHEL`, and
+`-ExpectedArchitecture x86_64|aarch64`. Without the VM binding it is an SSH Linux
+CPU test. Retrieved guest/smoke JSON must prove completion, model/deadline,
+native CPU evidence, recall provenance, database reopening, and shutdown; SSH
+exit zero alone does not establish a passed guest test.
+
+The script accepts a DNS name or IPv4 address; IPv6
 address literals are not supported. `-Model` selects one of the catalog models;
 the default smoke fixture is `qwen2.5-1.5b`. The smaller 0.5B model remains an
 explicit option, but its weaker recall/assessment can fail the strict smoke

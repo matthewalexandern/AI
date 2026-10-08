@@ -12,20 +12,25 @@ Download the matching artifact from [v0.1.0-rc.4](https://github.com/matthewalex
 
 ```sh
 # Ubuntu 22.04+ / RHEL 9-compatible Linux, x86-64-v2 CPU; use linux-arm64 on ARM
+prefix="${XDG_CONFIG_HOME:-$HOME/.config}/mini-fabrics"
 chmod +x ./mini-fabrics-installer-linux-amd64
-./mini-fabrics-installer-linux-amd64 --doctor
-./mini-fabrics-installer-linux-amd64 --model gpt-oss-20b --non-interactive
+./mini-fabrics-installer-linux-amd64 --prefix "$prefix" --doctor
+./mini-fabrics-installer-linux-amd64 --prefix "$prefix" --backend cpu --model gpt-oss-20b --non-interactive
 
 # macOS 13+, Apple silicon; use darwin-amd64 on Intel
+prefix="$HOME/Library/Application Support/mini-fabrics"
 chmod +x ./mini-fabrics-installer-darwin-arm64
-./mini-fabrics-installer-darwin-arm64 --model auto --non-interactive
+./mini-fabrics-installer-darwin-arm64 --prefix "$prefix" --backend cpu --model auto --non-interactive
 ```
 
 ```powershell
 # Windows / PowerShell; use windows-arm64 on ARM
-.\mini-fabrics-installer-windows-amd64.exe --doctor
-.\mini-fabrics-installer-windows-amd64.exe --model gpt-oss-20b --non-interactive
+$prefix = Join-Path $env:APPDATA 'mini-fabrics'
+.\mini-fabrics-installer-windows-amd64.exe --prefix $prefix --doctor
+.\mini-fabrics-installer-windows-amd64.exe --prefix $prefix --backend cpu --model gpt-oss-20b --non-interactive
 ```
+
+These examples use the CPU backend covered by the current release tests. On Apple hardware, opt into `--backend metal` and run the [Metal hardware smoke test](docs/native-testing.md#swift-resource-adapter) to verify real offload; Metal inference remains untested in this release record.
 
 Run without model options for interactive selection. GPT-OSS 20B MXFP4 is the preferred recommendation when it fits the conservative memory estimate. GPT-OSS 120B MXFP4 is an explicit option. Their downloads are approximately 11.28 GiB and 59.03 GiB. Qwen2.5 Instruct 0.5B, 1.5B, and 3B Q4_K_M provide smaller choices. `--model auto` selects a fitting recommendation; it explains any Qwen fallback. Explicit choices are preserved, and known insufficient RAM/VRAM blocks the download unless `--allow-low-memory` is supplied. Estimates reserve workspace/context headroom and do not guarantee successful allocation.
 
@@ -44,18 +49,22 @@ A local GGUF remains at its supplied path. Downloads use content-addressed filen
 
 ## Run and adaptive cognition
 
-Default installation home is the user configuration directory plus `mini-fabrics`: `~/.config/mini-fabrics` on Linux, `~/Library/Application Support/mini-fabrics` on macOS, and `%APPDATA%\mini-fabrics` on Windows. Use installer `--prefix DIRECTORY` to change it.
+Default installation home is the user configuration directory plus `mini-fabrics`: `${XDG_CONFIG_HOME:-$HOME/.config}/mini-fabrics` on Linux, `~/Library/Application Support/mini-fabrics` on macOS, and `%APPDATA%\mini-fabrics` on Windows. Use installer `--prefix DIRECTORY` to change it. Set `prefix` to the directory reported by the installer; the commands below use its executable directly, and the installer does not modify PATH.
 
 ```sh
-fabrics --home /path/to/mini-fabrics doctor
-fabrics --home /path/to/mini-fabrics chat --session personal --turn-timeout 30m
-fabrics --home /path/to/mini-fabrics ask --mode adaptive --json "Explain SQLite FTS5 briefly."
-fabrics --home /path/to/mini-fabrics ask --mode deep --json "Compare these options and review the tradeoffs."
+prefix="/path/to/mini-fabrics" # Replace with your installation directory.
+runtime="$prefix/bin/fabrics"
+"$runtime" --home "$prefix" doctor
+"$runtime" --home "$prefix" chat --session personal --turn-timeout 30m
+"$runtime" --home "$prefix" ask --mode adaptive --turn-timeout 30m --json "Explain SQLite FTS5 briefly."
+"$runtime" --home "$prefix" ask --mode deep --turn-timeout 30m --json "Compare these options and review the tradeoffs."
 ```
 
 ```powershell
 $prefix = Join-Path $env:APPDATA 'mini-fabrics'
-& "$prefix\bin\fabrics.exe" --home $prefix chat --session personal
+# Set $prefix to your installation directory if you used --prefix.
+$runtime = Join-Path $prefix 'bin\fabrics.exe'
+& $runtime --home $prefix chat --session personal --turn-timeout 30m
 ```
 
 Adaptive scheduling uses request structure, length, recalled evidence, and history. It chooses fast for simple requests, balanced for contextual answers, and deep for analysis or multipart tasks. Explicit `--mode fast|balanced|deep` overrides the choice. `cognition_mode` in `config.json` sets the default.
@@ -70,19 +79,19 @@ JSON results include `assessed` and the scheduling `decision`: requested/selecte
 
 ## Memory management
 
-Memory commands work without loading a model:
+Memory commands work without loading a model. Use the same `prefix` and `runtime` variables as above:
 
 ```sh
-fabrics --home /path/to/mini-fabrics remember "I prefer concise answers and metric units."
-fabrics --home /path/to/mini-fabrics recall "metric units"
-fabrics --home /path/to/mini-fabrics episodes --session personal
-fabrics --home /path/to/mini-fabrics memory list --limit 20
-fabrics --home /path/to/mini-fabrics memory inspect 1
-fabrics --home /path/to/mini-fabrics memory forget 1
-fabrics --home /path/to/mini-fabrics memory export memories.json
-fabrics --home /path/to/mini-fabrics memory backup memories.sqlite
-fabrics --home /path/to/mini-fabrics memory restore memories.json
-fabrics --home /path/to/mini-fabrics memory restore --replace memories.sqlite
+"$runtime" --home "$prefix" remember "I prefer concise answers and metric units."
+"$runtime" --home "$prefix" recall "metric units"
+"$runtime" --home "$prefix" episodes --session personal
+"$runtime" --home "$prefix" memory list --limit 20
+"$runtime" --home "$prefix" memory inspect 1
+"$runtime" --home "$prefix" memory forget 1
+"$runtime" --home "$prefix" memory export memories.json
+"$runtime" --home "$prefix" memory backup memories.sqlite
+"$runtime" --home "$prefix" memory restore memories.json
+"$runtime" --home "$prefix" memory restore --replace memories.sqlite
 ```
 
 Forgetting a note removes that record and its search entry. Forgetting an episode deletes its associated turn, history, and episode, and prunes obsolete recall IDs from surviving provenance. Ordinary new memories do not reuse forgotten IDs. This is logical deletion: historical backups, old disk pages, and separately stored copies of facts are outside its scope.
@@ -94,7 +103,7 @@ History is session-specific; searchable memories are shared within a home. Use s
 ## Local API
 
 ```sh
-fabrics --home /path/to/mini-fabrics serve --listen 127.0.0.1:8080 --mode adaptive
+"$runtime" --home "$prefix" serve --listen 127.0.0.1:8080 --mode adaptive --turn-timeout 30m
 curl -fsS http://127.0.0.1:8080/health
 curl -fsS http://127.0.0.1:8080/v1/chat -H 'Content-Type: application/json' \
   -d '{"session":"personal","input":"What do you remember about my preferences?"}'

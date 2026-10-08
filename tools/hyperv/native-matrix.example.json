@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "enable_hyperv": false,
+  "report_root": "C:\\MiniFabrics\\test-evidence\\native-run-01",
+  "windows": {
+    "installer": "C:\\MiniFabrics\\release\\mini-fabrics-installer-windows-amd64.exe",
+    "installer_sha256": "1011e36407b9c79b8ede362a39f2e8aa74853a45acc32a7fe3323ddcb9c54cbf",
+    "model": "gpt-oss-20b",
+    "turn_timeout_seconds": 1800
+  },
+  "provision": [],
+  "guests": [
+    {
+      "vm_name": "MiniFabrics-Ubuntu",
+      "distribution": "Ubuntu",
+      "architecture": "x86_64",
+      "host_name": "192.168.1.120",
+      "user_name": "tester",
+      "port": 22,
+      "identity_file": "C:\\Users\\YOURNAME\\.ssh\\id_ed25519",
+      "known_hosts_file": "C:\\Users\\YOURNAME\\.ssh\\known_hosts",
+      "installer": "C:\\MiniFabrics\\release\\mini-fabrics-installer-linux-amd64",
+      "installer_sha256": "979b41ddaefadde3fcf00943cac1e8d7dbfd1ef412f633e0e81487ca568792b4",
+      "model": "gpt-oss-20b",
+      "turn_timeout_seconds": 1800
+    },
+    {
+      "vm_name": "MiniFabrics-RHEL",
+      "distribution": "RHEL",
+      "architecture": "x86_64",
+      "host_name": "192.168.1.121",
+      "user_name": "tester",
+      "port": 22,
+      "identity_file": "C:\\Users\\YOURNAME\\.ssh\\id_ed25519",
+      "known_hosts_file": "C:\\Users\\YOURNAME\\.ssh\\known_hosts",
+      "installer": "C:\\MiniFabrics\\release\\mini-fabrics-installer-linux-amd64",
+      "installer_sha256": "979b41ddaefadde3fcf00943cac1e8d7dbfd1ef412f633e0e81487ca568792b4",
+      "model": "gpt-oss-20b",
+      "turn_timeout_seconds": 1800
+    }
+  ]
+}

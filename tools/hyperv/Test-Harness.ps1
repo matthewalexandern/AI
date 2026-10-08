@@ -34,7 +34,9 @@ try {
     try { $null = New-FabricsEvidenceDirectory -Path $created }
     catch { $failedAsExpected = $true }
     if (-not $failedAsExpected) { throw 'Existing evidence was not preserved.' }
+    & (Join-Path $PSScriptRoot 'Test-NativeArguments.ps1')
     & (Join-Path $PSScriptRoot 'Test-Runners.ps1')
+    & (Join-Path $PSScriptRoot 'Test-Matrix.ps1')
     Write-Host 'PowerShell parse and command/evidence protocol tests passed. Hyper-V and Windows native execution were not tested.'
 }
 finally {

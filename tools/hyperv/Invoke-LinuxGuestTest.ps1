@@ -18,6 +18,10 @@ param(
     [ValidateRange(10, 3600)][int]$TurnTimeoutSeconds = 300,
     [ValidateRange(1, 65535)][int]$Port = 22,
     [string]$IdentityFile,
+    [string]$KnownHostsFile,
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$')][string]$VMName,
+    [ValidateSet('Ubuntu', 'RHEL')][string]$ExpectedDistribution,
+    [ValidateSet('x86_64', 'aarch64')][string]$ExpectedArchitecture,
     [string]$ReportDirectory = (Join-Path (Get-Location) ('mini-fabrics-linux-' + [guid]::NewGuid().ToString('N')))
 )
 
@@ -33,6 +37,11 @@ $report = New-FabricsEvidenceDirectory -Path $ReportDirectory
 $destination = $UserName + '@' + $HostName
 $remoteDirectory = '/tmp/mini-fabrics-test-' + [guid]::NewGuid().ToString('N')
 $commonOptions = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=15')
+if ($KnownHostsFile) {
+    $knownHosts = Get-Item -LiteralPath $KnownHostsFile -ErrorAction Stop
+    if ($knownHosts.PSIsContainer) { throw 'KnownHostsFile must name an existing verified SSH host-key file.' }
+    $commonOptions += @('-o', (Get-FabricsKnownHostsOption -Path $knownHosts.FullName))
+}
 if ($IdentityFile) {
     $key = Get-Item -LiteralPath $IdentityFile -ErrorAction Stop
     if ($key.PSIsContainer) { throw 'IdentityFile must name an existing SSH private key.' }
@@ -43,7 +52,19 @@ $scpOptions = $commonOptions + @('-P', "$Port")
 $status = 'failed'
 $failure = $null
 $remoteCreated = $false
+$binding = $null
+$verifiedEvidence = $null
 try {
+    if ($VMName) {
+        if (-not $ExpectedDistribution -or -not $ExpectedArchitecture) { throw 'A Hyper-V claim requires VMName, ExpectedDistribution, and ExpectedArchitecture together.' }
+        $binding = Get-FabricsHyperVBinding -Name $VMName -HostName $HostName
+        $destination = $UserName + '@' + $binding.ssh_ipv4
+        # Preserve the original trusted SSH host-key name even when using its
+        # VM-bound IP, so changing DNS cannot redirect an accepted connection.
+        $hostKeyName = $(if ($Port -eq 22) { $HostName } else { '[' + $HostName + ']:' + $Port })
+        $sshOptions += @('-o', ('HostKeyAlias=' + $hostKeyName))
+        $scpOptions += @('-o', ('HostKeyAlias=' + $hostKeyName))
+    }
     $code = Invoke-FabricsLoggedCommand -Executable $ssh -Arguments ($sshOptions + @($destination, "umask 077 && mkdir $remoteDirectory")) -LogPath (Join-Path $report 'ssh-prepare.log')
     if ($code -ne 0) { throw "SSH setup failed (exit $code). Establish and verify the host key and key authentication before retrying." }
     $remoteCreated = $true
@@ -72,6 +93,9 @@ finally {
             $source = $destination + ':' + $remoteDirectory + '/evidence'
             $copyCode = Invoke-FabricsLoggedCommand -Executable $scp -Arguments ($scpOptions + @('-r', $source, $report)) -LogPath (Join-Path $report 'download-evidence.log')
             if ($copyCode -ne 0) { throw "Evidence retrieval exited with $copyCode." }
+            if ($status -eq 'passed') {
+                $verifiedEvidence = Assert-FabricsGuestEvidence -ReportDirectory $report -ExpectedDistribution $ExpectedDistribution -ExpectedArchitecture $ExpectedArchitecture -InstallerSHA256 $InstallerSHA256 -Model $Model -TurnTimeoutSeconds $TurnTimeoutSeconds
+            }
         }
         catch {
             $status = 'failed'
@@ -83,8 +107,10 @@ finally {
         turn_timeout_seconds = $TurnTimeoutSeconds
         installer_sha256 = $InstallerSHA256.ToLowerInvariant()
         guest_directory = $remoteDirectory; report_directory = $report; failure = $failure
+        hyperv_vm = $binding; verified_guest = $verifiedEvidence
+        evidence_kind = $(if ($binding -and $verifiedEvidence -and $status -eq 'passed') { 'named Hyper-V guest CPU test' } else { 'SSH Linux CPU test; no completed Hyper-V claim' })
         scope = 'Linux guest CPU installation, inference, isolated memory, persistence and shutdown; no GPU validation'
-    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $report 'controller-report.json') -Encoding UTF8
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $report 'controller-report.json') -Encoding UTF8
 }
 if ($failure) { throw $failure }
 Write-Host "Guest CPU verification passed. Evidence: $report"
