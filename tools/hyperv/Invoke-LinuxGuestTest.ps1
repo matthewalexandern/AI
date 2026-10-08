@@ -40,7 +40,8 @@ $commonOptions = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o
 if ($KnownHostsFile) {
     $knownHosts = Get-Item -LiteralPath $KnownHostsFile -ErrorAction Stop
     if ($knownHosts.PSIsContainer) { throw 'KnownHostsFile must name an existing verified SSH host-key file.' }
-    $commonOptions += @('-o', (Get-FabricsKnownHostsOption -Path $knownHosts.FullName))
+    $sshConfig = New-FabricsKnownHostsConfig -ReportDirectory $report -KnownHostsPath $knownHosts.FullName
+    $commonOptions += @('-F', $sshConfig)
 }
 if ($IdentityFile) {
     $key = Get-Item -LiteralPath $IdentityFile -ErrorAction Stop

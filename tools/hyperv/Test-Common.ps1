@@ -22,15 +22,24 @@ function Invoke-FabricsLoggedCommand {
     return [int]$code
 }
 
-function Get-FabricsKnownHostsOption {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    if ([string]::IsNullOrEmpty($Path) -or $Path -match '["\x00-\x1f]') { throw 'Known-host paths cannot contain quotes or control characters.' }
-    $option = 'UserKnownHostsFile="' + $Path.Replace('\', '/') + '"'
-    # PowerShell 5.1 removes embedded native-argument quotes. Preserve the
-    # quotes required by OpenSSH's list-of-files parser when using that mode.
-    $argumentMode = Get-Variable -Name PSNativeCommandArgumentPassing -ValueOnly -ErrorAction SilentlyContinue
-    if ($PSVersionTable.PSVersion -lt [version]'7.3' -or $argumentMode -eq 'Legacy') { $option = $option.Replace('"', '\"') }
-    return $option
+function New-FabricsKnownHostsConfig {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReportDirectory,
+        [Parameter(Mandatory = $true)][string]$KnownHostsPath
+    )
+    $directory = Get-Item -LiteralPath $ReportDirectory -ErrorAction Stop
+    $knownHosts = Get-Item -LiteralPath $KnownHostsPath -ErrorAction Stop
+    if (-not $directory.PSIsContainer -or $knownHosts.PSIsContainer) { throw 'Expected an existing evidence directory and a verified known-host file.' }
+    $path = $knownHosts.FullName.Replace('\', '/')
+    if ($path -match '["\x00-\x1f]') { throw 'Known-host paths cannot contain quotes or control characters.' }
+    $config = Join-Path $directory.FullName 'ssh-known-hosts.config'
+    if (Test-Path -LiteralPath $config) { throw "Preserving existing SSH configuration '$config'." }
+    # Keep quoting in a fixed config file rather than a native command argument;
+    # Windows PowerShell 5.1 and modern PowerShell then pass only the -F path.
+    $content = "Host *`n    UserKnownHostsFile `"$path`"`n"
+    $encoding = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($config, $content, $encoding)
+    return $config
 }
 
 function Assert-FabricsArtifact {

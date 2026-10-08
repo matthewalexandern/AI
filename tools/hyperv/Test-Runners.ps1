@@ -55,6 +55,8 @@ function Invoke-FabricsLoggedCommand {
     $artifact = Join-Path $fixtureRoot 'installer-fixture'
     Set-Content -LiteralPath $artifact -Value 'Non-executable installer fixture.'
     $checksum = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+    $knownHosts = Join-Path $fixtureRoot 'verified known_hosts'
+    Set-Content -LiteralPath $knownHosts -Value '# Fixture host-key file only.'
     $env:OS = 'Windows_NT'
     $env:MINI_FABRICS_FIXTURE_GUEST_ID = 'ubuntu'
     $env:MINI_FABRICS_FIXTURE_GUEST_ARCH = 'x86_64'
@@ -92,6 +94,7 @@ function Invoke-FabricsLoggedCommand {
         } else {
             $parameters.HostName = 'fixture.example'
             $parameters.UserName = 'tester'
+            $parameters.KnownHostsFile = $knownHosts
             & (Join-Path $fixtureScripts 'Invoke-LinuxGuestTest.ps1') @parameters 6>$null | Out-Null
             $record = Get-Content -LiteralPath (Join-Path $report 'controller-report.json') -Raw | ConvertFrom-Json
             $calls = @(Get-Content -LiteralPath $env:MINI_FABRICS_FIXTURE_TRACE | ForEach-Object { $_ | ConvertFrom-Json })
@@ -99,6 +102,8 @@ function Invoke-FabricsLoggedCommand {
             if ($commands.Count -ne 1 -or -not $commands[0].EndsWith(" $($case.ExpectedModel) $($case.ExpectedTimeout)")) { throw 'Guest model/timeout SSH forwarding failed.' }
             foreach ($call in $calls) {
                 if ($call.arguments -notcontains 'BatchMode=yes' -or $call.arguments -notcontains 'StrictHostKeyChecking=yes') { throw 'SSH trust controls changed.' }
+                $configIndex = [array]::IndexOf($call.arguments, '-F')
+                if ($configIndex -lt 0 -or $call.arguments[$configIndex + 1] -ne (Join-Path $report 'ssh-known-hosts.config')) { throw 'SSH/SCP did not use the fixed verified host-key config.' }
             }
         }
         if ($record.status -ne 'passed' -or $record.model -ne $case.ExpectedModel -or $record.turn_timeout_seconds -ne $case.ExpectedTimeout) { throw 'Controller report lost model or timeout.' }
@@ -145,6 +150,7 @@ function Invoke-FabricsLoggedCommand {
         $parameters = @{
             HostName = $case.Host; UserName = 'tester'; Installer = $artifact; InstallerSHA256 = $checksum
             ReportDirectory = $report; VMName = 'MiniFabrics-Ubuntu'; ExpectedArchitecture = 'x86_64'
+            KnownHostsFile = $knownHosts
             ExpectedDistribution = $(if ($case.ContainsKey('Distribution')) { $case.Distribution } else { 'Ubuntu' })
         }
         $succeeded = $true

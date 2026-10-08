@@ -87,6 +87,9 @@ guest addresses, ordinary SSH usernames, and verified known-hosts/private-key
 file paths. Do not put passwords or key contents in the JSON. Relative paths are
 resolved from the plan's directory. The example targets x64 Windows and existing
 Ubuntu/RHEL guests; ARM hosts need matching installers, media, and architecture.
+An explicit known-hosts file uses a generated fixed SSH configuration; unrelated
+settings from your user SSH config are excluded. Specify your key and port in
+the plan when needed.
 
 ```powershell
 Copy-Item .\tools\hyperv\native-matrix.example.json .\matrix.local.json
