@@ -51,11 +51,19 @@ try {
         $script:matrixFixtureLaunches += @{ file=$FilePath; verb=$Verb; arguments=$ArgumentList; wait=[bool]$Wait; pass_thru=[bool]$PassThru }
         return [pscustomobject]@{ ExitCode=0 }
     }
-    $env:SystemRoot=$fixture
+    # Windows cryptographic providers depend on the real SystemRoot. Only
+    # synthesize a path for the mocked launcher on a non-Windows test host.
+    if ([string]::IsNullOrEmpty($savedSystemRoot)) {
+        if ($savedOS -eq 'Windows_NT') { throw 'Windows fixture requires the actual SystemRoot.' }
+        $env:SystemRoot=$fixture
+    }
+    $expectedPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $quotedPath=Join-Path $fixture "plan's quoted name.json"
     Copy-Item -LiteralPath $initial -Destination $quotedPath
     $null=& $originalElevation -Path $quotedPath -PlanSHA $digest -ScriptsSHA $digest
     $launch=$script:matrixFixtureLaunches[0]
+    if ($launch.file -cne $expectedPowerShell -or ($savedSystemRoot -and $env:SystemRoot -cne $savedSystemRoot)) { throw 'Launcher fixture changed the OS root or selected an unexpected Windows PowerShell path.' }
+    $env:SystemRoot=$savedSystemRoot
     $decoded=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($launch.arguments[-1]))
     $tokens=$null; $errors=$null
     $null=[System.Management.Automation.Language.Parser]::ParseInput($decoded,[ref]$tokens,[ref]$errors)
